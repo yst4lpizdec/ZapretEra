@@ -46,6 +46,20 @@ class AutostartManager:
         proc = self._run_schtasks(["/Query", "/TN", self.TASK_NAME])
         return proc.returncode == 0
 
+    def task_runs_elevated(self) -> bool:
+        """Создана ли задача с повышением прав."""
+        proc = self._run_schtasks(["/Query", "/TN", self.TASK_NAME, "/XML"])
+        if proc.returncode != 0:
+            return False
+        return "HighestAvailable" in (proc.stdout or "")
+
+    def repair_elevation(self) -> bool:
+        """Пересоздаёт задачу, если она осталась без прав администратора."""
+        if not self._task_exists() or self.task_runs_elevated():
+            return False
+        self.logging.log("info", "Recreating autostart task with elevation")
+        return self._create_task(self._build_command())
+
     def _run_entry_exists(self) -> bool:
         try:
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.RUN_KEY, 0, winreg.KEY_READ) as key:
@@ -71,6 +85,10 @@ class AutostartManager:
                 self.TASK_NAME,
                 "/TR",
                 command,
+                # без повышения прав компоненты не стартуют: драйвер WinDivert
+                # требует администратора, а при автозапуске UAC не запрашивается
+                "/RL",
+                "HIGHEST",
             ]
         )
         if proc.returncode != 0:

@@ -14604,6 +14604,12 @@ class MainWindow(QMainWindow):
         except Exception:
             return
         if bool(getattr(settings, "autostart_prompt_shown", False)):
+            # задачи прежних версий создавались без прав администратора,
+            # и компоненты при старте системы не поднимались
+            try:
+                self.context.autostart.repair_elevation()
+            except Exception:
+                pass
             return
         # не перебиваем первичную настройку - спросим, когда она закончится
         onboarding = getattr(self, "_onboarding_widget", None)
@@ -14619,8 +14625,8 @@ class MainWindow(QMainWindow):
         agreed = self._ask_yes_no(
             self._t("Автозапуск", "Autostart"),
             self._t(
-                "Запускать ZapretEra вместе с Windows? Это можно изменить в настройках.",
-                "Start ZapretEra together with Windows? You can change this later in settings.",
+                "Запускать ZapretEra вместе с Windows и сразу включать обход? Это можно изменить в настройках.",
+                "Start ZapretEra with Windows and enable bypass right away? You can change this later in settings.",
             ),
         )
         if not agreed:
@@ -14630,7 +14636,22 @@ class MainWindow(QMainWindow):
         except Exception as error:
             self.context.logging.log("warning", "Autostart prompt failed", error=str(error))
             return
-        self.context.settings.update(autostart_windows=enabled)
+        if not enabled:
+            self.context.settings.update(autostart_windows=False)
+            self._reload_settings_page()
+            return
+        # одного запуска приложения мало: без этих настроек обход
+        # при старте системы не поднимется
+        current = self.context.settings.get()
+        autostart_ids = list(current.autostart_component_ids or [])
+        for component_id in (current.enabled_component_ids or []):
+            if component_id not in autostart_ids:
+                autostart_ids.append(component_id)
+        self.context.settings.update(
+            autostart_windows=True,
+            auto_run_components=True,
+            autostart_component_ids=autostart_ids,
+        )
         self._reload_settings_page()
 
 
