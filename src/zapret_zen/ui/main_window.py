@@ -14603,13 +14603,13 @@ class MainWindow(QMainWindow):
             settings = self.context.settings.get()
         except Exception:
             return
+        # молчаливая миграция: задачи версии 1.0.0 создавались без прав
+        # администратора, из-за чего компоненты при старте не поднимались
+        try:
+            self.context.autostart.repair_elevation()
+        except Exception:
+            pass
         if bool(getattr(settings, "autostart_prompt_shown", False)):
-            # задачи прежних версий создавались без прав администратора,
-            # и компоненты при старте системы не поднимались
-            try:
-                self.context.autostart.repair_elevation()
-            except Exception:
-                pass
             return
         # не перебиваем первичную настройку - спросим, когда она закончится
         onboarding = getattr(self, "_onboarding_widget", None)
@@ -14618,17 +14618,23 @@ class MainWindow(QMainWindow):
             return
         self.context.settings.update(autostart_prompt_shown=True)
         try:
-            if self.context.autostart.is_enabled():
-                return
+            already_enabled = bool(self.context.autostart.is_enabled())
         except Exception:
             return
-        agreed = self._ask_yes_no(
-            self._t("Автозапуск", "Autostart"),
-            self._t(
+        # спрашивать нечего, только если настроено и то и другое
+        if already_enabled and bool(getattr(settings, "auto_run_components", False)):
+            return
+        if already_enabled:
+            question = self._t(
+                "Запуск вместе с Windows уже включён, но обход при этом не поднимается. Включать и его?",
+                "ZapretEra already starts with Windows, but the bypass stays off. Enable it at startup too?",
+            )
+        else:
+            question = self._t(
                 "Запускать ZapretEra вместе с Windows и сразу включать обход? Это можно изменить в настройках.",
                 "Start ZapretEra with Windows and enable bypass right away? You can change this later in settings.",
-            ),
-        )
+            )
+        agreed = self._ask_yes_no(self._t("Автозапуск", "Autostart"), question)
         if not agreed:
             return
         try:
