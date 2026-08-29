@@ -12,9 +12,6 @@
 который, в свою очередь, основан на работе [goshkow](https://github.com/goshkow).
 Распространяется под лицензией MIT с сохранением исходного копирайта.
 
-<a href="https://github.com/yst4lpizdec/ZapretEra">
-  <img src="https://img.shields.io/badge/Официальный_Сайт-ZapretEra-42a5f5?style=for-the-badge&logo=github" alt="Официальный сайт проекта" />
-</a>
 
 [![Version](https://img.shields.io/github/v/release/yst4lpizdec/ZapretEra?style=for-the-badge&logo=github&color=5865F2&label=Версия)](https://github.com/yst4lpizdec/ZapretEra/releases)
 [![Views](https://img.shields.io/endpoint?url=https://hits.dwyl.com/yst4lpizdec/ZapretEra.json&style=for-the-badge&color=42a5f5&label=Просмотров)](https://github.com/yst4lpizdec/ZapretEra)
