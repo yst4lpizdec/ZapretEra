@@ -57,7 +57,7 @@
 
 ### 📦 Портативная версия (Рекомендуется)
 
-1. Скачайте архив `zapret_era_<version>_portable_win_<architecture>.zip` со страницы [Releases](https://github.com/yst4lpizdec/ZapretEra/releases) под вашу архитектуру CPU.
+1. Скачайте архив `zapret_era_<version>.zip` со страницы [Releases](https://github.com/yst4lpizdec/ZapretEra/releases).
 2. Распакуйте содержимое в удобную папку.
 3. Запустите `zapret_era.exe`.
 
@@ -68,15 +68,6 @@
 
 ---
 
-## 🛠️ Вики для разработчиков
-
-У проекта есть *полноценный* wiki, в котором подробно расписаны детали для разработки проекта.
-
-<a href="https://github.com/yst4lpizdec/ZapretEra/wiki">
-  <img src="https://img.shields.io/badge/Открыть_Wiki-ZapretEra-2ea44f?style=for-the-badge&logo=github" alt="GitHub Wiki" />
-</a>
-
----
 
 ## 🧲 Используемые компоненты
 
@@ -105,23 +96,12 @@
 
 ---
 
-## 🆘 Частые проблемы
-
-YouTube грузится частично или зависает, превью не открываются, антивирус блокирует файлы, проверка конфигураций выдаёт ошибки — решения типовых проблем собраны в wiki.
-
-<a href="https://github.com/yst4lpizdec/ZapretEra/wiki/%D0%A7%D0%B0%D1%81%D1%82%D1%8B%D0%B5-%D0%BF%D1%80%D0%BE%D0%B1%D0%BB%D0%B5%D0%BC%D1%8B">
-  <img src="https://img.shields.io/badge/Решения_проблем-Открыть_Wiki-42a5f5?style=for-the-badge&logo=github" alt="Частые проблемы" />
-</a>
-
----
-
 ## 📞 Обратная связь
 
 | Назначение | Ссылка |
 | --- | --- |
 | 🐛 **Проблема** | [Сообщить об ошибке](https://github.com/yst4lpizdec/ZapretEra/issues/new) |
 | 💬 **Обсуждения** | [Задать вопрос или предложить идею](https://github.com/yst4lpizdec/ZapretEra/discussions) |
-| 📢 **Новости** | [Telegram-канал проекта](https://t.me/zapzen) |
 
 ---
 
