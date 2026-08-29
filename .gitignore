@@ -1,0 +1,53 @@
+# python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+docs/
+
+# venv
+.venv/
+venv/
+
+# builds
+build/
+dist/
+dist_*/
+dist_fresh*/
+dist_inst*/
+dist_new*/
+dist_nuitka_*/
+release_*/
+.release_cache/
+github_release/
+portable/
+installer_payload/
+nuitka-crash-report.xml
+build_pyinstaller/
+build_installer/
+
+# runtime data
+logs/
+cache/
+data/
+mods/
+merged_runtime/
+backups/
+configs/
+core/
+default_packs/
+
+# local tools
+*.zip
+*.7z
+*.log
+*.tmp
+
+# ide
+.idea/
+.vscode/
+ZapretEra.wiki
+# tg-ws-proxy prebuilt binaries (AV false positives, unused: worker runs from source)
+runtime/tg-ws-proxy/*.exe
+runtime/tg-ws-proxy/bin/

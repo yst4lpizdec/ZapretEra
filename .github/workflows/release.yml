@@ -1,0 +1,353 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag (e.g. v2.2.0)"
+        required: true
+        default: "v2.2.0"
+      release_name:
+        description: "Release title (e.g. ZapretEra 2.2.0)"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark as prerelease"
+        type: boolean
+        required: false
+        default: false
+      body:
+        description: "Release notes (Markdown). If empty, reads from release_note.md"
+        required: false
+        default: ""
+
+jobs:
+  build-windows-x64:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean workspace
+        shell: pwsh
+        run: |
+          Remove-Item .\dist_nuitka -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\.nuitka_staging -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          PIP_PREFER_BINARY: "1"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build Nuitka x64
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          }
+          $version = $tag.TrimStart("v")
+          .\scripts\build_nuitka.ps1 -Python python -OutputDir dist_nuitka -Compiler msvc -Version $version
+
+      - name: Upload x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-win-x64
+          path: dist_nuitka/main.dist/**
+          if-no-files-found: error
+
+  build-windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean workspace
+        shell: pwsh
+        run: |
+          Remove-Item .\dist_nuitka -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\.nuitka_staging -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust fallback
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          PIP_PREFER_BINARY: "1"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Build Nuitka arm64
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          }
+          $version = $tag.TrimStart("v")
+          .\scripts\build_nuitka.ps1 -Python python -OutputDir dist_nuitka -Compiler msvc -Version $version
+
+      - name: Upload arm64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-win-arm64
+          path: dist_nuitka/main.dist/**
+          if-no-files-found: error
+
+  package-and-release:
+    needs:
+      - build-windows-x64
+      - build-windows-arm64
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean workspace
+        shell: pwsh
+        run: |
+          Remove-Item .\dist_nuitka -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\dist_installer -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\.nuitka_staging -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\.artifacts -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\installer_payload -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item .\release_* -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        shell: pwsh
+        env:
+          PIP_PREFER_BINARY: "1"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nuitka-win-x64
+          path: .artifacts/win_x64
+
+      - name: Download arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nuitka-win-arm64
+          path: .artifacts/win_arm64
+
+      - name: Resolve version
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          }
+          if (-not $tag -or $tag -eq "") { $tag = "v0.0.0" }
+          $tag = $tag.Trim()
+          $version = $tag.TrimStart("v")
+          $name = "${{ inputs.release_name }}"
+          if (-not $name -or $name -eq "") { $name = "ZapretEra $version" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - name: Inject version into pyproject.toml
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $content = Get-Content pyproject.toml -Raw -Encoding UTF8
+          $content = $content -replace 'version = ".*"', "version = `"$version`""
+          Set-Content pyproject.toml $content -Encoding UTF8 -NoNewline
+          Write-Host "Set version to $version in pyproject.toml"
+
+      - name: Prepare release payloads
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          python .\scripts\prepare_nuitka_release.py `
+            --x64-source .\.artifacts\win_x64 `
+            --arm64-source .\.artifacts\win_arm64 `
+            --payload-dir .\installer_payload `
+            --release-dir ".\release_$version" `
+            --version $version
+
+      - name: Build universal installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          .\scripts\build_nuitka_installer.ps1 -Python python -PayloadDir installer_payload -OutputDir dist_installer -SkipPrepareRelease -Version $version
+
+      - name: Place installer into release folder
+        shell: pwsh
+        run: |
+          $version = "${{ steps.meta.outputs.version }}"
+          $installer = Get-ChildItem ".\dist_installer\install_zapretera_*.exe" | Select-Object -First 1
+          if ($installer) {
+            Copy-Item $installer.FullName ".\release_$version\" -Force
+          }
+
+      - name: Check if release exists
+        id: release_check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $exists = "false"
+          try {
+            $list = gh release list --json tagName --limit 200 2>$null | ConvertFrom-Json
+            if ($null -ne $list -and $list.tagName -contains $tag) {
+              $exists = "true"
+              Write-Host "Release $tag already exists"
+            } else {
+              Write-Host "Release $tag does not exist"
+            }
+          } catch {
+            Write-Host "Could not check releases, assuming does not exist"
+          }
+          "exists=$exists" >> $env:GITHUB_OUTPUT
+
+      - name: Prepare release body
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_BODY: ${{ inputs.body }}
+          RELEASE_EXISTS: ${{ steps.release_check.outputs.exists }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ steps.meta.outputs.version }}"
+          $tag = "${{ steps.meta.outputs.tag }}"
+
+          $body = ""
+          if ($env:DISPATCH_BODY -and $env:DISPATCH_BODY.Trim()) {
+            $body = $env:DISPATCH_BODY
+          } elseif (Test-Path "release_note.md") {
+            $fileBody = Get-Content "release_note.md" -Raw -Encoding UTF8
+            if ($fileBody -and $fileBody.Trim()) {
+              $body = $fileBody.TrimEnd()
+            }
+          }
+
+          if (-not $body.Trim() -and $env:RELEASE_EXISTS -eq "true") {
+            $existing = gh release view $tag --json body --jq .body 2>$null
+            if ($LASTEXITCODE -eq 0 -and $existing -and $existing.Trim()) {
+              $body = $existing -replace "`r`n", "`n"
+            }
+          }
+
+          if (-not $body.Trim()) {
+            $body = "ZapretEra $version release."
+          }
+
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText("release_body.txt", $body, $utf8NoBom)
+          Write-Host "Release body prepared (length: $($body.Length) chars)"
+
+      - name: Create new GitHub release
+        if: steps.release_check.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $name = "${{ steps.meta.outputs.name }}"
+          $prerelease = "${{ inputs.prerelease }}"
+
+          $args = @(
+            "release", "create", $tag,
+            "--title", $name,
+            "--notes-file", "release_body.txt"
+          )
+
+          if ($prerelease -eq "true") {
+            $args += "--prerelease"
+          }
+
+          # Add all release files
+          $version = "${{ steps.meta.outputs.version }}"
+          $files = Get-ChildItem ".\release_$version\*" -File
+          foreach ($file in $files) {
+            $args += $file.FullName
+          }
+
+          Write-Host "Creating release $tag with title '$name'"
+          & gh @args
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to create release"
+            exit 1
+          }
+
+      - name: Update existing release assets
+        if: steps.release_check.outputs.exists == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $version = "${{ steps.meta.outputs.version }}"
+
+          Write-Host "Updating release $tag (body from prepared release_body.txt)"
+
+          gh release edit $tag --notes-file "release_body.txt"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to update release body"
+            exit 1
+          }
+
+          # Upload all files with --clobber to replace existing assets
+          $files = Get-ChildItem ".\release_$version\*" -File
+          foreach ($file in $files) {
+            Write-Host "Uploading $($file.Name)..."
+            gh release upload $tag $file.FullName --clobber
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to upload $($file.Name)"
+              exit 1
+            }
+          }
+
+          Write-Host "All assets updated successfully"

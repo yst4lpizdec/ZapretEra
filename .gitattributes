@@ -1,0 +1,15 @@
+# бинарные ресурсы: никаких преобразований переводов строк
+*.bin  binary
+*.exe  binary
+*.dll  binary
+*.sys  binary
+*.ico  binary
+*.png  binary
+*.jpg  binary
+*.otf  binary
+*.ttf  binary
+
+# скрипты Windows выполняются cmd.exe, им нужен CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
