@@ -23,7 +23,7 @@ def _should_skip_path(path: Path, source_dir: Path) -> bool:
     return False
 
 
-def _zip_with_root(source_dir: Path, zip_path: Path, root_name: str = "zapret_zen") -> None:
+def _zip_with_root(source_dir: Path, zip_path: Path, root_name: str = "ZapretEra") -> None:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     if zip_path.exists():
         zip_path.unlink()

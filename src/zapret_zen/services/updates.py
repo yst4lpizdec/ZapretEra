@@ -353,6 +353,10 @@ class UpdatesManager:
         result = raw.get("result")
         if not isinstance(result, dict):
             return None
+        # кеш собран другой версией приложения: после обновления он сообщал бы
+        # о доступном обновлении на уже установленную версию
+        if str(result.get("current_version", "")) != str(__version__):
+            return None
         status = str(result.get("status", ""))
         if status not in {"available", "up-to-date"}:
             return None
@@ -543,9 +547,11 @@ class UpdatesManager:
         direct_exe = extract_root / "zapret_era.exe"
         if direct_exe.exists():
             return extract_root
-        named_root = extract_root / "zapret_zen"
-        if (named_root / "zapret_era.exe").exists():
-            return named_root
+        # zapret_zen - имя папки в архивах версий 1.0.0-1.0.2
+        for folder_name in ("ZapretEra", "zapret_zen"):
+            named_root = extract_root / folder_name
+            if (named_root / "zapret_era.exe").exists():
+                return named_root
         for candidate in extract_root.iterdir():
             if candidate.is_dir() and (candidate / "zapret_era.exe").exists():
                 return candidate
