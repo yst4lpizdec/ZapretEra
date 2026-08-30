@@ -147,7 +147,9 @@ jobs:
           Remove-Item .\.nuitka_staging -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item .\.artifacts -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item .\installer_payload -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item .\release_* -Recurse -Force -ErrorAction SilentlyContinue
+          # Только каталоги сборки: маска release_* иначе удаляет release_note.md,
+          # и шаг Prepare release body ниже не находит его, подставляя заглушку
+          Get-ChildItem .\release_* -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Set up Python
         uses: actions/setup-python@v6
