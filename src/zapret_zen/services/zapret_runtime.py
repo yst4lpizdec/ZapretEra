@@ -64,14 +64,24 @@ class ZapretRuntimeBuilder:
         bundle_id = str(item.get("bundle_id", ""))
         name = str(item.get("name", ""))
         lowered = name.lower()
-        number = -1
-        match = re.search(r"alt\s*(\d+)", lowered)
-        if match:
-            number = int(match.group(1))
-        elif lowered == "general.bat":
-            number = 0
         modified_rank = 0 if bundle_id != "base" else 2
-        return (modified_rank, -number, lowered)
+        return (modified_rank, self.general_option_rank(lowered), lowered)
+
+    @staticmethod
+    def general_option_rank(name: str) -> int:
+        """Порядок перебора: general.bat, ALT, ALT2..ALTn, затем прочие варианты.
+
+        Автоподбор идёт сверху вниз и останавливается на первом рабочем, поэтому
+        начинать нужно с базовой стратегии, а не с самой новой.
+        """
+        lowered = str(name or "").lower()
+        if lowered == "general.bat":
+            return 0
+        match = re.fullmatch(r"general \(alt\s*(\d*)\)\.bat", lowered)
+        if match:
+            digits = match.group(1)
+            return int(digits) if digits else 1
+        return 10_000
 
     def prepare_active_zapret_runtime(self, selected_bundle_root: Path, selected_bundle_id: str, selected_script_name: str) -> Path:
         self._cleanup_inactive_zapret_runtimes()

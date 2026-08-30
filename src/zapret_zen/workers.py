@@ -28,11 +28,13 @@ def run_tg_ws_proxy_worker(
     verbose: bool = False,
     dc_ip: list[str] | None = None,
     cfproxy_enabled: bool = True,
-    cfproxy_priority: bool = True,
     cfproxy_domain: str = "",
+    cfproxy_worker_domain: str = "",
     fake_tls_domain: str = "",
     buf_kb: int = 256,
     pool_size: int = 4,
+    log_file: str = "",
+    log_max_mb: float = 5.0,
 ) -> int:
     if is_packaged_runtime():
         install_root = packaged_install_root()
@@ -81,10 +83,15 @@ def run_tg_ws_proxy_worker(
         argv.extend(["--dc-ip", "__empty__"])
     if not cfproxy_enabled:
         argv.append("--no-cfproxy")
-    if cfproxy_domain.strip():
-        argv.extend(["--cfproxy-domain", cfproxy_domain.strip()])
+    for domain in _split_domain_list(cfproxy_domain):
+        argv.extend(["--cfproxy-domain", domain])
+    for domain in _split_domain_list(cfproxy_worker_domain):
+        argv.extend(["--cfproxy-worker-domain", domain])
     if fake_tls_domain.strip():
         argv.extend(["--fake-tls-domain", fake_tls_domain.strip()])
+    if str(log_file or "").strip():
+        argv.extend(["--log-file", str(log_file).strip()])
+        argv.extend(["--log-max-mb", str(max(0.1, float(log_max_mb or 5.0)))])
     argv.extend(["--buf-kb", str(max(4, int(buf_kb or 256)))])
     argv.extend(["--pool-size", str(max(0, int(pool_size or 4)))])
     if verbose:
@@ -105,6 +112,16 @@ def run_tg_ws_proxy_worker(
     finally:
         sys.argv = prev_argv
     return 0
+def _split_domain_list(value: str) -> list[str]:
+    """Апстрим принимает --cfproxy-domain/--cfproxy-worker-domain многократно."""
+    items: list[str] = []
+    for raw in str(value or "").replace(",", " ").replace(";", " ").split():
+        item = raw.strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
 def _resolve_install_root() -> Path:
     if is_packaged_runtime():
         return packaged_install_root()

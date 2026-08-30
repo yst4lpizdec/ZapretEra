@@ -57,6 +57,24 @@ class SettingsManager:
             settings.component_selection_initialized = True
             changed = True
 
+        # Одноразовая миграция DC -> IP на адреса, рекомендованные апстримом.
+        # Старая пара .51/.91 - та самая, из-за которой в tg-ws-proxy не грузятся
+        # фото и видео на аккаунтах без Premium (см. docs/README.md апстрима).
+        legacy_dc_ip = {
+            "2:149.154.167.51\n4:149.154.167.91",
+            "4:149.154.167.91",
+        }
+        current_dc_ip = "\n".join(
+            line.strip() for line in str(raw.get("tg_proxy_dc_ip", "") or "").splitlines() if line.strip()
+        )
+        if current_dc_ip in legacy_dc_ip:
+            if current_dc_ip == "4:149.154.167.91":
+                settings.tg_proxy_dc_ip = "4:149.154.167.220"
+            else:
+                settings.tg_proxy_dc_ip = "2:149.154.167.220\n4:149.154.167.220"
+            settings.tg_proxy_link_prompt_signature = ""
+            changed = True
+
         if not raw.get("language"):
             settings.language = self._detect_system_language()
             changed = True
@@ -116,16 +134,6 @@ class SettingsManager:
             settings.selected_runtime_mode = "zapret"
             changed = True
 
-        dc_ip_raw = str(settings.tg_proxy_dc_ip or "").strip()
-        dc_ips_present = set()
-        for part in dc_ip_raw.replace("\n", ",").split(","):
-            token = part.strip()
-            if token and ":" in token:
-                dc_ips_present.add(token.split(":")[0])
-        if "2" not in dc_ips_present and "4" in dc_ips_present:
-            settings.tg_proxy_dc_ip = "2:149.154.167.51\n4:149.154.167.91"
-            changed = True
-
         selected_service_ids = raw.get("selected_service_ids", [])
         if not isinstance(selected_service_ids, list):
             settings.selected_service_ids = []
@@ -161,6 +169,11 @@ class SettingsManager:
     def update(self, **changes: object) -> AppSettings:
         for key, value in changes.items():
             setattr(self._settings, key, value)
+        if changes.get("general_autotest_done") and "general_autotest_version" not in changes:
+            # Помечаем, для какой версии подбор уже пройден, чтобы после
+            # обновления предложить его заново.
+            from zapret_zen import __version__
+            self._settings.general_autotest_version = __version__
         self.save()
         return self._settings
 

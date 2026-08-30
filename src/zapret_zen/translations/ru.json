@@ -286,5 +286,7 @@
   "Delete profile": "Удалить профиль",
   "Delete profile \"{name}\"? This action cannot be undone.": "Удалить профиль «{name}»? Это действие нельзя отменить.",
   "Switching profile...": "Переключение профиля...",
-  "Applying profile settings...": "Применяем настройки профиля..."
+  "Applying profile settings...": "Применяем настройки профиля...",
+  "Not now": "Не сейчас",
+  "CF Worker domain": "CF Worker домен"
 }

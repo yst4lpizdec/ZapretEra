@@ -268,6 +268,10 @@ class ProcessManager:
             secret=secret,
         )
 
+    def is_telegram_running(self) -> bool:
+        """Запущен ли Telegram Desktop прямо сейчас."""
+        return self._is_telegram_running()
+
     def consume_telegram_proxy_launch_info(self) -> dict[str, Any] | None:
         info = self._telegram_proxy_launch_info
         self._telegram_proxy_launch_info = None
@@ -1187,6 +1191,22 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             (self.storage.paths.logs_dir / "tg_worker_error.log").unlink(missing_ok=True)
         except Exception:
             pass
+        # Свои процессы уже остановлены, поэтому слушатель на порту сейчас может
+        # быть только чужим. Без этой проверки готовность ниже срабатывает на
+        # чужом сокете: наш воркер стартует секунды, а посторонний прокси
+        # отвечает мгновенно, и компонент показывает "запущено", хотя наш
+        # процесс умер на bind, а Telegram говорит с чужим прокси.
+        listen_host = settings.tg_proxy_host
+        listen_port = int(settings.tg_proxy_port)
+        if self._is_port_listening(listen_host, listen_port):
+            error_hint = (
+                f"Порт {listen_host}:{listen_port} уже занят другим процессом. "
+                "Закройте сторонний прокси на этом порту или укажите другой порт в настройках."
+            )
+            state = ComponentState(component_id=component_id, status="error", last_error=error_hint)
+            self._states[component_id] = state
+            self.logging.log("error", "TG WS Proxy port already in use", host=listen_host, port=listen_port)
+            return state
         command = self._build_worker_command(
             "tg-ws-proxy",
             tg_host=settings.tg_proxy_host,
@@ -1194,11 +1214,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             tg_secret=secret,
             tg_dc_ip=self._parse_tg_dc_ip_settings(settings.tg_proxy_dc_ip),
             tg_cfproxy_enabled=bool(settings.tg_proxy_cfproxy_enabled),
-            tg_cfproxy_priority=bool(settings.tg_proxy_cfproxy_priority),
             tg_cfproxy_domain=settings.tg_proxy_cfproxy_domain,
+            tg_cfproxy_worker_domain=settings.tg_proxy_cfproxy_worker_domain,
             tg_fake_tls_domain=settings.tg_proxy_fake_tls_domain,
             tg_buf_kb=int(settings.tg_proxy_buf_kb or 256),
             tg_pool_size=int(settings.tg_proxy_pool_size or 4),
+            tg_log_file=str(self.storage.paths.logs_dir / "tg_ws_proxy.log"),
         )
         self.logging.log("info", "TG WS Proxy starting", command=" ".join(command))
         process = subprocess.Popen(
@@ -1207,11 +1228,12 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             creationflags=self._creationflags,
             startupinfo=self._startupinfo,
             env=self._build_worker_env(),
-            stdout=self._open_source_log_stream("tg-ws-proxy"),
+            # Лог пишет сам прокси через --log-file (с ротацией и лимитом).
+            # Перенаправлять сюда же stdout нельзя: два писателя в один файл, и
+            # ротация не сможет его переименовать, пока держим handle.
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
         )
-        listen_host = settings.tg_proxy_host
-        listen_port = int(settings.tg_proxy_port)
         ready = False
         exit_code = None
         for _ in range(16):
@@ -1260,7 +1282,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         signature = (
             f"{settings.tg_proxy_host}:{int(settings.tg_proxy_port)}:{secret}:"
             f"{settings.tg_proxy_dc_ip}:{settings.tg_proxy_cfproxy_enabled}:"
-            f"{settings.tg_proxy_cfproxy_priority}:{settings.tg_proxy_cfproxy_domain}:"
+            f"{settings.tg_proxy_cfproxy_domain}:{settings.tg_proxy_cfproxy_worker_domain}:"
             f"{settings.tg_proxy_fake_tls_domain}:{settings.tg_proxy_buf_kb}:{settings.tg_proxy_pool_size}"
         )
         if settings.tg_proxy_link_prompt_signature != signature:

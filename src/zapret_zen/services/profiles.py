@@ -23,7 +23,7 @@ _SNAPSHOT_SKIP = {
     "tg_proxy_secret",
     "tg_proxy_dc_ip",
     "tg_proxy_cfproxy_enabled",
-    "tg_proxy_cfproxy_priority",
+    "tg_proxy_cfproxy_worker_domain",
     "tg_proxy_cfproxy_domain",
     "tg_proxy_fake_tls_domain",
     "tg_proxy_buf_kb",

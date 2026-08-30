@@ -230,11 +230,13 @@ def run(argv: list[str] | None = None) -> int:
             verbose=known.tg_verbose,
             dc_ip=list(known.tg_dc_ip or []),
             cfproxy_enabled=parse_bool_flag(known.tg_cfproxy_enabled),
-            cfproxy_priority=parse_bool_flag(known.tg_cfproxy_priority),
             cfproxy_domain=known.tg_cfproxy_domain,
+            cfproxy_worker_domain=known.tg_cfproxy_worker_domain,
             fake_tls_domain=known.tg_fake_tls_domain,
             buf_kb=known.tg_buf_kb,
             pool_size=known.tg_pool_size,
+            log_file=known.tg_log_file,
+            log_max_mb=known.tg_log_max_mb,
         )
     if not known.autostart_launch:
         _startup_trace("run: ensure_admin start")

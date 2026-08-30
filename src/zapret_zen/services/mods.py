@@ -34,7 +34,7 @@ _MOD_SETTING_STRINGS = {
     "tg_proxy_cfproxy_domain",
     "tg_proxy_fake_tls_domain",
 }
-_MOD_SETTING_BOOLS = {"tg_proxy_cfproxy_enabled", "tg_proxy_cfproxy_priority"}
+_MOD_SETTING_BOOLS = {"tg_proxy_cfproxy_enabled"}
 _MOD_SETTING_PORTS = {"tg_proxy_port"}
 _MOD_SETTING_POSITIVE_INTS = {"tg_proxy_buf_kb", "tg_proxy_pool_size"}
 MOD_SETTING_KEYS = (
