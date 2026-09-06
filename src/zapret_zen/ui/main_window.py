@@ -3901,6 +3901,7 @@ class SettingsDialog(AppDialog):
         self.tray_checkbox = QCheckBox(self._t("Start in tray"))
         self.auto_components_checkbox = QCheckBox(self._t("Auto-run components"))
         self.check_updates_checkbox = QCheckBox(self._t("Check for updates"))
+        self.auto_recheck_checkbox = QCheckBox(self._t("Автоподбор стратегии в фоне", "Auto-check strategy in background"))
 
         scroll = QScrollArea()
         scroll.setObjectName("SettingsScroll")
@@ -3930,6 +3931,7 @@ class SettingsDialog(AppDialog):
         app_form.addRow("", self.tray_checkbox)
         app_form.addRow("", self.auto_components_checkbox)
         app_form.addRow("", self.check_updates_checkbox)
+        app_form.addRow("", self.auto_recheck_checkbox)
 
         zapret_form = self._settings_section(canvas_layout, "Zapret", "zapret")
         zapret_form.addRow("IPSet mode", self.ipset_mode_combo)
@@ -4083,6 +4085,7 @@ class SettingsDialog(AppDialog):
         self.tray_checkbox.setChecked(settings.start_in_tray)
         self.auto_components_checkbox.setChecked(settings.auto_run_components)
         self.check_updates_checkbox.setChecked(settings.check_updates_on_start)
+        self.auto_recheck_checkbox.setChecked(bool(getattr(settings, "auto_recheck_enabled", False)))
 
     def load_from_payload(self, payload: dict[str, object]) -> None:
         self._load()
@@ -4112,6 +4115,7 @@ class SettingsDialog(AppDialog):
         self.tray_checkbox.setChecked(bool(payload.get("start_in_tray", self.context.settings.get().start_in_tray)))
         self.auto_components_checkbox.setChecked(bool(payload.get("auto_run_components", self.context.settings.get().auto_run_components)))
         self.check_updates_checkbox.setChecked(bool(payload.get("check_updates_on_start", self.context.settings.get().check_updates_on_start)))
+        self.auto_recheck_checkbox.setChecked(bool(payload.get("auto_recheck_enabled", getattr(self.context.settings.get(), "auto_recheck_enabled", False))))
 
     def payload(self) -> dict[str, object]:
         try:
@@ -4148,6 +4152,7 @@ class SettingsDialog(AppDialog):
             "start_in_tray": self.tray_checkbox.isChecked(),
             "auto_run_components": self.auto_components_checkbox.isChecked(),
             "check_updates_on_start": self.check_updates_checkbox.isChecked(),
+            "auto_recheck_enabled": self.auto_recheck_checkbox.isChecked(),
         }
 
     def _select_combo_value(self, combo: QComboBox, value: str) -> None:
@@ -4636,6 +4641,8 @@ class MainWindow(QMainWindow):
         self._file_tag_render_timer.timeout.connect(self._render_file_tags_chunk)
         self._backend_tasks: dict[str, str] = {}
         self._backend_attached = False
+        self._health_check_scheduled = False
+        self._health_check_task_id: str | None = None
         self._autostart_watchdog = QTimer(self)
         self._autostart_watchdog.setSingleShot(True)
         self._autostart_watchdog.setInterval(120000)
@@ -4775,6 +4782,28 @@ class MainWindow(QMainWindow):
             backend.task_progress.connect(self._on_backend_task_progress)
         except Exception:
             pass
+
+    def begin_bootstrap_autostart(self) -> None:
+        """Отметить, что автозапуск компонентов уже поставлен в очередь воркера.
+
+        Bootstrap-задача кладётся в очередь мимо `_submit_backend_task`, поэтому
+        без этого окно и трей до конца запуска показывают устаревшее состояние
+        и выглядят подвисшими.
+        """
+        if self._toggle_in_progress:
+            return
+        self.context.logging.log("info", "bootstrap_autostart_begin")
+        self._loading_action = "connect"
+        self._toggle_in_progress = True
+        self._autostart_in_progress = True
+        self._autostart_watchdog.start()
+        self._loading_timer.start()
+        self._advance_loading_caption()
+        self._state_generation += 1
+        if isinstance(self.power_button, AnimatedPowerButton):
+            self.power_button.set_spinner_active(True)
+        self.power_button.setEnabled(False)
+        self._mark_dirty("dashboard", "components", "tray")
 
     def attach_backend_client(self, backend) -> None:
         self.context.backend = backend
@@ -5324,6 +5353,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(4200, self._maybe_prompt_telegram_proxy_connect)
         QTimer.singleShot(4800, self._check_updates_on_start)
         QTimer.singleShot(5600, self._check_component_updates_background)
+        QTimer.singleShot(9000, self._maybe_prompt_auto_recheck)
 
     def _check_component_updates_background(self) -> None:
         if self._launch_hidden:
@@ -7578,6 +7608,10 @@ class MainWindow(QMainWindow):
         check_upd_cb.setChecked(settings.check_updates_on_start)
         ctrl["check_updates"] = check_upd_cb
         app_section.addWidget(check_upd_cb)
+        auto_recheck_cb = QCheckBox(self._t("Автоподбор стратегии в фоне", "Auto-check strategy in background"))
+        auto_recheck_cb.setChecked(bool(getattr(settings, "auto_recheck_enabled", False)))
+        ctrl["auto_recheck"] = auto_recheck_cb
+        app_section.addWidget(auto_recheck_cb)
 
 
         # --- Profiles section ---
@@ -8176,7 +8210,7 @@ class MainWindow(QMainWindow):
         lang_grp = all_ctrl.get("language")
         if isinstance(lang_grp, QButtonGroup):
             lang_grp.idClicked.connect(_lang_changed)
-        for key in ("autostart", "tray", "auto_components", "check_updates", "tg_cfproxy"):
+        for key in ("autostart", "tray", "auto_components", "check_updates", "auto_recheck", "tg_cfproxy"):
             cb = all_ctrl.get(key)
             if isinstance(cb, QCheckBox):
                 cb.stateChanged.connect(_ctrl_changed)
@@ -8240,6 +8274,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("check_updates")
         if isinstance(cb, QCheckBox):
             cb.setChecked(settings.check_updates_on_start)
+        cb = ctrl.get("auto_recheck")
+        if isinstance(cb, QCheckBox):
+            cb.setChecked(bool(getattr(settings, "auto_recheck_enabled", False)))
 
         tab_bar = page.findChild(_SettingsTabBar, "SettingsTabBar")
         if tab_bar is not None:
@@ -8326,6 +8363,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("check_updates")
         if isinstance(cb, QCheckBox):
             payload["check_updates_on_start"] = cb.isChecked()
+        cb = ctrl.get("auto_recheck")
+        if isinstance(cb, QCheckBox):
+            payload["auto_recheck_enabled"] = cb.isChecked()
 
         val = _read_seg("ipset_mode")
         if val:
@@ -9291,6 +9331,12 @@ class MainWindow(QMainWindow):
             if bool(payload.get("theme_changed")) or bool(payload.get("language_changed")):
                 self._schedule_full_locale_theme_refresh()
             self._mark_dirty("dashboard", "services", "components", "mods", "files", "logs", "tray")
+            if bool(getattr(self.context.settings.get(), "auto_recheck_enabled", False)):
+                self._schedule_background_health_check()
+        if action == "background_health_check":
+            self._handle_health_check_result(payload)
+            self._mark_dirty("dashboard", "components", "tray")
+            return
         if action == "start_enabled_components":
             pass
         if action in {"toggle_master_runtime", "start_enabled_components", "select_general"}:
@@ -9491,6 +9537,10 @@ class MainWindow(QMainWindow):
         source = self._backend_error_source(action, str(message.get("source", "") or ""))
         raw_error = str(message.get("error", self._t("Unknown error.")))
         error = self._friendly_backend_error(raw_error, source=source, action=action)
+        if action == "background_health_check":
+            self._health_check_task_id = None
+            self.context.logging.log("warning", "background_health_check_failed", error=error)
+            return
         if action == "load_startup_snapshot":
             self.context.logging.log("error", "startup_snapshot_failed", error=error)
             self._ensure_local_runtime_snapshot()
@@ -11857,7 +11907,7 @@ class MainWindow(QMainWindow):
                 btn.setEnabled(has_update)
                 if has_update and cid not in connected:
                     connected.add(cid)
-                    btn.clicked.connect(lambda c=cid: self._update_manager_apply(c))
+                    btn.clicked.connect(lambda _checked=False, c=cid: self._update_manager_apply(c))
             self._update_manager_connected_btns = connected
             if getattr(self, "_update_manager_done", False):
                 dialog = getattr(self, "_update_manager_dialog", None)
@@ -11872,6 +11922,10 @@ class MainWindow(QMainWindow):
             pass
 
     def _update_manager_apply(self, component_id: str) -> None:
+        component_id = str(component_id or "")
+        if component_id not in {"application", "tg_ws_proxy", "zapret"}:
+            self.context.logging.log("warning", "update_manager_apply_unknown_component", component_id=component_id)
+            return
         results = dict(getattr(self, "_update_manager_results", {}))
         info = results.get(component_id, {})
         dialog = getattr(self, "_update_manager_dialog", None)
@@ -14695,6 +14749,112 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return ""
         return field.text().strip()
+
+    BACKGROUND_HEALTH_CHECK_DELAY_MS = 45000
+
+    def _maybe_prompt_auto_recheck(self) -> None:
+        """Один раз за версию предлагает фоновую перепроверку стратегии."""
+        try:
+            settings = self.context.settings.get()
+        except Exception:
+            return
+        already_asked = str(getattr(settings, "auto_recheck_prompt_version", "") or "") == __version__
+        if already_asked:
+            if bool(getattr(settings, "auto_recheck_enabled", False)):
+                self._schedule_background_health_check()
+            return
+        if self._skip_autosettings or self._launch_hidden:
+            return
+        # не перебиваем первичную настройку - спросим, когда она закончится
+        onboarding = getattr(self, "_onboarding_widget", None)
+        if onboarding is not None and onboarding.isVisible():
+            QTimer.singleShot(8000, self._maybe_prompt_auto_recheck)
+            return
+        agreed = self._ask_yes_no(
+            self._t("Автоподбор стратегии", "Automatic strategy check"),
+            self._t(
+                "Проверять при каждом запуске, работает ли выбранная стратегия обхода, и "
+                "при сбое автоматически подбирать другую? Проверка идёт в фоне через минуту "
+                "после старта. Это можно изменить в настройках.",
+                "Check on every launch whether the selected bypass strategy still works and "
+                "pick another one automatically when it fails? The check runs in the background "
+                "a minute after startup. You can change this later in settings.",
+            ),
+        )
+        self.context.settings.update(
+            auto_recheck_prompt_version=__version__,
+            auto_recheck_enabled=bool(agreed),
+        )
+        self._reload_settings_page()
+        if agreed:
+            self._schedule_background_health_check()
+
+    def _schedule_background_health_check(self) -> None:
+        if getattr(self, "_health_check_scheduled", False):
+            return
+        self._health_check_scheduled = True
+        QTimer.singleShot(self.BACKGROUND_HEALTH_CHECK_DELAY_MS, self._run_background_health_check)
+
+    def _run_background_health_check(self) -> None:
+        self._health_check_scheduled = False
+        try:
+            settings = self.context.settings.get()
+        except Exception:
+            return
+        if not bool(getattr(settings, "auto_recheck_enabled", False)):
+            return
+        if getattr(self, "_health_check_task_id", None):
+            return
+        # проверка перезапускает winws, поэтому не лезем поверх других операций
+        busy = (
+            self._toggle_in_progress
+            or self._autostart_in_progress
+            or getattr(self, "_general_test_running", False)
+            or getattr(self, "_settings_diag_task_id", None)
+            or getattr(self, "_isolated_profile_benchmark", None) is not None
+        )
+        if busy or self.context.backend is None:
+            self._health_check_scheduled = True
+            QTimer.singleShot(30000, self._run_background_health_check)
+            return
+        self.context.settings.update(auto_recheck_last_run=datetime.utcnow().isoformat())
+        self.context.logging.log("info", "background_health_check_requested")
+        self._health_check_task_id = self._submit_backend_task(
+            "background_health_check", {"allow_reselect": True}
+        )
+
+    def _handle_health_check_result(self, payload: object) -> None:
+        self._health_check_task_id = None
+        if not isinstance(payload, dict):
+            return
+        result = payload.get("health_check")
+        if not isinstance(result, dict):
+            return
+        status = str(result.get("status", ""))
+        if status in {"skipped", "ok"}:
+            return
+        if status == "reselected" and bool(result.get("switched")):
+            self._invalidate_general_options_cache()
+            self._page_payload_cache.clear()
+            general_id = str(result.get("general_id", ""))
+            self._toast_notification(
+                "info",
+                self._t("Автоподбор стратегии", "Automatic strategy check"),
+                self._t(
+                    f"Прежняя стратегия перестала работать, переключился на {general_id}.",
+                    f"The previous strategy stopped working, switched to {general_id}.",
+                ),
+            )
+            return
+        if status == "degraded":
+            self._toast_notification(
+                "warning",
+                self._t("Автоподбор стратегии", "Automatic strategy check"),
+                self._t(
+                    "Текущая стратегия работает нестабильно, а рабочей замены не нашлось.",
+                    "The current strategy is unstable and no working replacement was found.",
+                ),
+            )
 
     def _maybe_prompt_autostart(self) -> None:
         """Один раз предлагает включить запуск вместе с Windows."""

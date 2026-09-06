@@ -332,6 +332,8 @@ def run(argv: list[str] | None = None) -> int:
 
             app.aboutToQuit.connect(_cleanup_before_quit)
             bootstrap_autostart = bool(known.autostart_launch and settings.auto_run_components)
+            if bootstrap_autostart:
+                window.begin_bootstrap_autostart()
             if launch_hidden:
                 _startup_trace("finish_bootstrap: hide window")
                 window.hide()

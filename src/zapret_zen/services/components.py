@@ -552,23 +552,20 @@ class ProcessManager:
                 self._states[component_id] = state
                 self.logging.log("error", "Zapret command parse failed", script=str(active_script))
                 return state
+            log_stream = self._open_source_log_stream("zapret")
+            log_offset = self._source_log_size("zapret")
             process = subprocess.Popen(
                 winws_command,
                 cwd=str(bin_dir),
                 creationflags=self._creationflags,
                 startupinfo=self._startupinfo,
-                stdout=self._open_source_log_stream("zapret"),
+                stdout=log_stream,
                 stderr=subprocess.STDOUT,
             )
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
-            running = False
-            for _ in range(24):
-                if self._is_image_running("winws.exe"):
-                    running = True
-                    break
-                time.sleep(0.25)
+            running, startup_error = self._await_zapret_ready(process, log_offset)
             if running:
                 try:
                     (active_root / ".driver_path_in_use").write_text(datetime.utcnow().isoformat(), encoding="utf-8")
@@ -580,7 +577,11 @@ class ProcessManager:
             else:
                 self._close_source_log_stream("zapret")
                 log_hint = self._recent_source_log_error("zapret")
-                error_message = log_hint or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
+                error_message = (
+                    log_hint
+                    or startup_error
+                    or "winws did not start. Run app as Administrator and check antivirus exclusions for WinDivert."
+                )
                 if not log_hint:
                     started_then_exited = self._check_log_hint("zapret", ("windivert", "capture is started"))
                     if started_then_exited:
@@ -1790,6 +1791,96 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def auto_select_working_general(self) -> dict[str, object] | None:
         return self.diagnostics.auto_select_working_general()
 
+    HEALTH_CHECK_PASS_RATIO = 0.75
+
+    def probe_current_general(self) -> dict[str, object]:
+        """Быстрая проверка уже запущенной стратегии, без перезапуска winws.
+
+        Полный подбор занимает минуты и рвёт соединение, поэтому в фоне
+        сначала выясняем, работает ли текущая конфигурация вообще.
+        """
+        settings = self.settings.get()
+        general_id = str(settings.selected_zapret_general or "")
+        targets = self._load_standard_test_targets()
+        if not targets:
+            return {"status": "unknown", "general_id": general_id, "passed": 0, "total": 0, "failed_targets": []}
+        passed = 0
+        failed_names: list[str] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
+            future_map = {executor.submit(self._check_target, target): target for target in targets}
+            for future in as_completed(future_map):
+                try:
+                    result = future.result()
+                except Exception:
+                    result = "failed"
+                if result == "ok":
+                    passed += 1
+                else:
+                    failed_names.append(str(future_map[future].get("name", "")))
+        total = len(targets)
+        healthy = passed >= max(1, int(round(total * self.HEALTH_CHECK_PASS_RATIO)))
+        return {
+            "status": "ok" if healthy else "degraded",
+            "general_id": general_id,
+            "passed": passed,
+            "total": total,
+            "failed_targets": failed_names,
+        }
+
+    def background_health_check(self, *, allow_reselect: bool = True) -> dict[str, object]:
+        """Проверить текущую стратегию и, если она деградировала, подобрать другую."""
+        if not self._is_image_running("winws.exe"):
+            return {"status": "skipped", "reason": "zapret is not running"}
+        probe = self.probe_current_general()
+        previous_id = str(probe.get("general_id", ""))
+        if probe.get("status") != "degraded":
+            self.logging.log(
+                "info",
+                "background_health_check_ok",
+                general=previous_id,
+                passed=probe.get("passed"),
+                total=probe.get("total"),
+            )
+            return {"status": "ok", "probe": probe, "switched": False, "general_id": previous_id}
+        self.logging.log(
+            "warning",
+            "background_health_check_degraded",
+            general=previous_id,
+            passed=probe.get("passed"),
+            total=probe.get("total"),
+            failed_targets=probe.get("failed_targets"),
+        )
+        if not allow_reselect:
+            return {"status": "degraded", "probe": probe, "switched": False, "general_id": previous_id}
+        selected = self.auto_select_working_general()
+        if not selected or not selected.get("id"):
+            # Подбор ничего не дал - возвращаем прежнюю стратегию, чтобы не
+            # оставить пользователя вообще без обхода.
+            if previous_id:
+                self.settings.update(selected_zapret_general=previous_id)
+            self.start_component("zapret")
+            return {"status": "degraded", "probe": probe, "switched": False, "general_id": previous_id}
+        new_id = str(selected["id"])
+        self.settings.update(selected_zapret_general=new_id)
+        state = self.start_component("zapret")
+        switched = new_id != previous_id
+        self.logging.log(
+            "info",
+            "background_health_check_reselected",
+            previous=previous_id,
+            selected=new_id,
+            switched=switched,
+            start_status=getattr(state, "status", ""),
+        )
+        return {
+            "status": "reselected",
+            "probe": probe,
+            "switched": switched,
+            "general_id": new_id,
+            "previous_general_id": previous_id,
+            "selection": selected,
+        }
+
     def _capture_diagnostic_settings(self) -> dict[str, object]:
         settings = self.settings.get()
         return {
@@ -2724,6 +2815,51 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         handle.flush()
         self._log_streams[source] = handle
         return handle
+
+    def _source_log_size(self, source: str) -> int:
+        try:
+            return Path(self.logging.source_log_path(source)).stat().st_size
+        except OSError:
+            return 0
+
+    def _source_log_tail(self, source: str, offset: int) -> str:
+        """Хвост лога, дописанный после offset."""
+        try:
+            with Path(self.logging.source_log_path(source)).open("rb") as handle:
+                handle.seek(max(0, int(offset)))
+                return handle.read().decode("utf-8", errors="ignore").lower()
+        except OSError:
+            return ""
+
+    ZAPRET_READY_MARKERS = ("windivert initialized", "capture is started")
+    ZAPRET_READY_TIMEOUT = 8.0
+    ZAPRET_READY_GRACE = 3.0
+
+    def _await_zapret_ready(self, process: subprocess.Popen[Any], log_offset: int) -> tuple[bool, str]:
+        """Дожидаемся, что поднялся именно наш winws.
+
+        Раньше успех определялся по `tasklist` для winws.exe, поэтому чужой или
+        остаточный процесс давал ложный "running", а упавший сразу после старта
+        (WinDivert ещё не готов при загрузке Windows) — не замечался вовсе.
+        Теперь смотрим на собственный PID и на маркер захвата в логе.
+        """
+        deadline = time.monotonic() + self.ZAPRET_READY_TIMEOUT
+        started_at = time.monotonic()
+        while time.monotonic() < deadline:
+            exit_code = process.poll()
+            if exit_code is not None:
+                return False, f"winws exited right after start (code {exit_code})."
+            tail = self._source_log_tail("zapret", log_offset)
+            if any(marker in tail for marker in self.ZAPRET_READY_MARKERS):
+                return True, ""
+            if "error" in tail or "unable to open" in tail:
+                return False, ""
+            # Не каждая сборка winws печатает маркер: если процесс пережил
+            # grace-период, считаем запуск успешным.
+            if time.monotonic() - started_at >= self.ZAPRET_READY_GRACE:
+                return True, ""
+            time.sleep(0.2)
+        return process.poll() is None, "winws did not report an active capture."
 
     def _recent_source_log_error(self, source: str) -> str:
         path = Path(self.logging.source_log_path(source))

@@ -405,6 +405,29 @@ def _handle_load_components_payload(context, payload, emit_progress):
     return result
 
 
+_AUTOSTART_RETRY_DELAYS = (2.0, 5.0, 10.0)
+
+
+def _retry_autostart_component(context, component_id: str, state):
+    import time as _time
+
+    for attempt, delay in enumerate(_AUTOSTART_RETRY_DELAYS, start=1):
+        context.logging.log(
+            "warning",
+            "autostart_component_retry",
+            component_id=component_id,
+            attempt=attempt,
+            delay=delay,
+            error=getattr(state, "last_error", ""),
+        )
+        _time.sleep(delay)
+        state = context.processes.start_component(component_id)
+        if getattr(state, "status", "") != "error":
+            context.logging.log("info", "autostart_component_recovered", component_id=component_id, attempt=attempt)
+            return state
+    return state
+
+
 @_register_action("start_enabled_components")
 def _handle_start_enabled_components(context, payload, emit_progress):
     _sync_telegram_component_from_services(context)
@@ -413,6 +436,7 @@ def _handle_start_enabled_components(context, payload, emit_progress):
     states = {item.component_id: item for item in context.processes.list_states()}
     started: list[str] = []
     skipped: list[str] = []
+    failed: list[str] = []
     for component in components:
         if component.id == "dns-manager":
             continue
@@ -424,10 +448,24 @@ def _handle_start_enabled_components(context, payload, emit_progress):
         if state is not None and state.status == "running":
             skipped.append(component.id)
             continue
-        context.processes.start_component(component.id)
-        started.append(component.id)
-    if started or skipped:
-        context.logging.log("info", "Start enabled components completed", started=started, skipped_running=skipped, autostart_only=autostart_only)
+        state = context.processes.start_component(component.id)
+        if autostart_only and getattr(state, "status", "") == "error":
+            # При старте вместе с Windows драйвер WinDivert и сетевой стек
+            # могут быть ещё не готовы, поэтому даём несколько попыток.
+            state = _retry_autostart_component(context, component.id, state)
+        if getattr(state, "status", "") == "error":
+            failed.append(component.id)
+        else:
+            started.append(component.id)
+    if started or skipped or failed:
+        context.logging.log(
+            "info",
+            "Start enabled components completed",
+            started=started,
+            skipped_running=skipped,
+            failed=failed,
+            autostart_only=autostart_only,
+        )
     # Force fresh state computation after all components started
     import time
     context.processes._invalidate_state_cache()
@@ -1087,6 +1125,18 @@ def _handle_run_general_diagnostic_batch(context, payload, emit_progress):
         stop_callback=(lambda: bool(cancel_path) and os.path.exists(cancel_path)),
     )
     return {"results": results}
+
+
+@_register_action("background_health_check")
+def _handle_background_health_check(context, payload, emit_progress):
+    allow_reselect = True
+    if isinstance(payload, dict):
+        allow_reselect = bool(payload.get("allow_reselect", True))
+    result = context.processes.background_health_check(allow_reselect=allow_reselect)
+    snapshot = _snapshot(context)
+    snapshot["health_check"] = result
+    snapshot["general_options"] = context.processes.list_zapret_generals()
+    return snapshot
 
 
 @_register_action("run_settings_diagnostics")

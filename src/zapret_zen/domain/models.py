@@ -62,6 +62,9 @@ class AppSettings:
     apply_update_on_next_launch: bool = False
     dismissed_component_updates: dict[str, str] = field(default_factory=dict)
     autostart_prompt_shown: bool = False
+    auto_recheck_enabled: bool = False
+    auto_recheck_prompt_version: str = ""
+    auto_recheck_last_run: str = ""
 
 
 @dataclass(slots=True)
