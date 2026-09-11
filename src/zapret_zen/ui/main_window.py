@@ -14906,6 +14906,10 @@ class MainWindow(QMainWindow):
 
     def _show_health_check_status(self, text: str) -> None:
         self._toggle_status_label.setText(text)
+        # текст меняется часто и заметно скачет по длине; без пересчёта плашка
+        # остаётся шириной под прошлую строку и обрезает новую
+        self._toggle_status_label.adjustSize()
+        self._toggle_status_card.adjustSize()
         if not self._toggle_status_card.isVisible():
             self._toggle_status_card.setVisible(True)
             self._start_toggle_pulse()
