@@ -7612,6 +7612,13 @@ class MainWindow(QMainWindow):
         auto_recheck_cb.setChecked(bool(getattr(settings, "auto_recheck_enabled", False)))
         ctrl["auto_recheck"] = auto_recheck_cb
         app_section.addWidget(auto_recheck_cb)
+        auto_recheck_result = QLabel("")
+        auto_recheck_result.setProperty("class", "muted")
+        auto_recheck_result.setWordWrap(True)
+        auto_recheck_result.setContentsMargins(22, 0, 0, 0)
+        ctrl["auto_recheck_result"] = auto_recheck_result
+        app_section.addWidget(auto_recheck_result)
+        self._apply_auto_recheck_result_label(auto_recheck_result, settings)
 
 
         # --- Profiles section ---
@@ -8228,6 +8235,31 @@ class MainWindow(QMainWindow):
 
         return page
 
+    def _apply_auto_recheck_result_label(self, label: QLabel, settings) -> None:
+        """Показывает итог последней фоновой проверки: после автозапуска
+        всплывающее уведомление легко пропустить."""
+        stored = getattr(settings, "auto_recheck_last_result", None)
+        summary = str(stored.get("summary", "") or "") if isinstance(stored, dict) else ""
+        if not summary:
+            label.setText(
+                self._t(
+                    "Последняя проверка: ещё не выполнялась",
+                    "Last check: not run yet",
+                )
+            )
+            label.setToolTip("")
+            return
+        when = ""
+        raw_when = str(stored.get("finished_at", "") or "")
+        if raw_when:
+            try:
+                when = datetime.fromisoformat(raw_when).strftime("%d.%m %H:%M")
+            except ValueError:
+                when = ""
+        prefix = self._t("Последняя проверка", "Last check")
+        label.setText(f"{prefix}{f' ({when})' if when else ''}: {summary}")
+        label.setToolTip(summary)
+
     def _reload_settings_page(self) -> None:
         page = self.pages.widget(self.PAGE_SETTINGS) if self.pages.count() > self.PAGE_SETTINGS else None
         if page is None:
@@ -8277,6 +8309,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("auto_recheck")
         if isinstance(cb, QCheckBox):
             cb.setChecked(bool(getattr(settings, "auto_recheck_enabled", False)))
+        result_label = ctrl.get("auto_recheck_result")
+        if isinstance(result_label, QLabel):
+            self._apply_auto_recheck_result_label(result_label, settings)
 
         tab_bar = page.findChild(_SettingsTabBar, "SettingsTabBar")
         if tab_bar is not None:
@@ -9539,6 +9574,10 @@ class MainWindow(QMainWindow):
         error = self._friendly_backend_error(raw_error, source=source, action=action)
         if action == "background_health_check":
             self._health_check_task_id = None
+            # подбор блокирует кнопку питания, поэтому её обязательно надо
+            # разблокировать, даже если воркер упал на середине
+            self._set_strategy_selection_active(False)
+            self._clear_health_check_status()
             self.context.logging.log("warning", "background_health_check_failed", error=error)
             return
         if action == "load_startup_snapshot":
@@ -9796,6 +9835,8 @@ class MainWindow(QMainWindow):
                         "config_total": int(payload.get("total", 0) or 0),
                     }
                 )
+        if action == "background_health_check" and isinstance(payload, dict):
+            self._on_health_check_progress(payload)
         if action == "run_settings_diagnostics" and isinstance(payload, dict):
             if self._settings_diag_progress_bar is not None:
                 total = max(1, int(payload.get("total", 1) or 1))
@@ -11083,10 +11124,24 @@ class MainWindow(QMainWindow):
         self._state_generation += 1
         self._submit_backend_task("toggle_master_runtime")
 
+    def _diagnostics_busy(self) -> bool:
+        """Идёт ли сейчас проверка/подбор, который сам управляет winws."""
+        return bool(
+            getattr(self, "_strategy_selection_active", False)
+            or getattr(self, "_health_check_task_id", None)
+            or getattr(self, "_general_test_running", False)
+            or getattr(self, "_settings_diag_task_id", None)
+            or getattr(self, "_isolated_profile_benchmark", None) is not None
+        )
+
     def _auto_restart_partial(self) -> None:
         if self._toggle_in_progress or not self._startup_snapshot_ready:
             return
         if self._partial_restart_count >= 3:
+            return
+        if self._diagnostics_busy():
+            # диагностика и подбор сами гасят и поднимают winws на каждой
+            # конфигурации, дозапуск здесь сломал бы им проверку
             return
         states = self._component_states()
         active_ids = self._master_active_components()
@@ -12960,7 +13015,12 @@ class MainWindow(QMainWindow):
             animate_power = not self._page_transition_running
             self.power_button.set_active_state(fully_running, animate=animate_power)
             self.power_button.set_partial_state(partially_running)
-        if partially_running and self._partial_restart_count < 3 and not self._toggle_in_progress:
+        if (
+            partially_running
+            and self._partial_restart_count < 3
+            and not self._toggle_in_progress
+            and not self._diagnostics_busy()
+        ):
             if not self._partial_restart_timer.isActive():
                 self._partial_restart_timer.start()
         else:
@@ -14833,37 +14893,220 @@ class MainWindow(QMainWindow):
             "background_health_check", {"allow_reselect": True}
         )
 
+    @staticmethod
+    def _short_general_name(raw: str) -> str:
+        """`bundle|general (ALT3).bat` -> `ALT3`, чтобы влезало в плашку."""
+        name = str(raw or "").split("|", 1)[-1].strip()
+        if name.lower().endswith(".bat"):
+            name = name[:-4]
+        if name.lower().startswith("general"):
+            name = name[len("general"):].strip()
+        name = name.strip("()").strip()
+        return name or "default"
+
+    def _show_health_check_status(self, text: str) -> None:
+        self._toggle_status_label.setText(text)
+        if not self._toggle_status_card.isVisible():
+            self._toggle_status_card.setVisible(True)
+            self._start_toggle_pulse()
+        # при запуске в трее окна на экране нет, поэтому дублируем в подсказку значка
+        self._set_tray_tooltip(text)
+
+    def _set_tray_tooltip(self, text: str = "") -> None:
+        tray = getattr(self, "tray_icon", None)
+        if tray is None:
+            return
+        try:
+            tray.setToolTip(f"ZapretEra — {text}" if text else "ZapretEra")
+        except Exception:
+            return
+
+    def _on_health_check_progress(self, payload: dict) -> None:
+        phase = str(payload.get("phase", "") or "")
+        name = self._short_general_name(
+            str(payload.get("general_name", "") or payload.get("general_id", "") or "")
+        )
+        if phase == "probe_start":
+            self._show_health_check_status(
+                self._t("Проверка стратегии…", "Checking strategy…")
+            )
+            return
+        if phase == "probe_target":
+            current = int(payload.get("current", 0) or 0)
+            total = int(payload.get("total", 0) or 0)
+            if total > 0:
+                self._show_health_check_status(
+                    self._t(
+                        f"Проверка стратегии… {current}/{total}",
+                        f"Checking strategy… {current}/{total}",
+                    )
+                )
+            return
+        if phase == "probe_done":
+            passed = int(payload.get("passed", 0) or 0)
+            total = int(payload.get("total", 0) or 0)
+            if str(payload.get("status", "")) == "degraded":
+                self._show_health_check_status(
+                    self._t(
+                        f"Стратегия {name}: {passed}/{total}, ищу замену",
+                        f"Strategy {name}: {passed}/{total}, looking for a replacement",
+                    )
+                )
+            else:
+                self._show_health_check_status(
+                    self._t(
+                        f"Стратегия {name} работает: {passed}/{total}",
+                        f"Strategy {name} works: {passed}/{total}",
+                    )
+                )
+            return
+        if phase == "select_start":
+            # дальше winws перезапускается на каждой конфигурации, поэтому
+            # кнопку надо заблокировать - как и при ручной диагностике
+            self._set_strategy_selection_active(True)
+            return
+        if phase == "select":
+            current = int(payload.get("current", 0) or 0)
+            total = int(payload.get("total", 0) or 0)
+            self._set_strategy_selection_active(True, current=max(0, current - 1), total=total)
+            self._show_health_check_status(
+                self._t(
+                    f"Подбор {current}/{total}: {name}",
+                    f"Trying {current}/{total}: {name}",
+                )
+            )
+            return
+        if phase == "select_result":
+            current = int(payload.get("current", 0) or 0)
+            total = int(payload.get("total", 0) or 0)
+            passed = int(payload.get("passed", 0) or 0)
+            checked = int(payload.get("total_targets", 0) or 0)
+            self._set_strategy_selection_active(True, current=current, total=total)
+            mark = "OK" if str(payload.get("status", "")) == "ok" else f"{passed}/{checked}"
+            self._show_health_check_status(
+                self._t(
+                    f"Подбор {current}/{total}: {name} — {mark}",
+                    f"Trying {current}/{total}: {name} — {mark}",
+                )
+            )
+            return
+        if phase == "restart":
+            self._show_health_check_status(
+                self._t(f"Включаю {name}…", f"Starting {name}…")
+            )
+            return
+
+    def _describe_health_check(self, result: dict) -> str:
+        status = str(result.get("status", ""))
+        name = self._short_general_name(
+            str(result.get("general_name", "") or result.get("general_id", "") or "")
+        )
+        probe = result.get("probe") if isinstance(result.get("probe"), dict) else {}
+        passed = int(probe.get("passed", 0) or 0)
+        total = int(probe.get("total", 0) or 0)
+        if status == "ok":
+            return self._t(
+                f"Стратегия {name} работает ({passed} из {total} проверок)",
+                f"Strategy {name} works ({passed} of {total} checks passed)",
+            )
+        if status == "reselected" and bool(result.get("switched")):
+            previous = self._short_general_name(
+                str(result.get("previous_general_name", "") or result.get("previous_general_id", "") or "")
+            )
+            selection = result.get("selection") if isinstance(result.get("selection"), dict) else {}
+            checked = int(selection.get("checked", 0) or 0)
+            candidates = int(selection.get("candidates", 0) or 0)
+            suffix = ""
+            if checked and candidates:
+                suffix = self._t(
+                    f", перебрано {checked} из {candidates}",
+                    f", {checked} of {candidates} tried",
+                )
+            return self._t(
+                f"Стратегия {previous} перестала работать — переключился на {name}{suffix}",
+                f"Strategy {previous} stopped working — switched to {name}{suffix}",
+            )
+        if status == "reselected":
+            return self._t(
+                f"Осталась прежняя стратегия {name}",
+                f"Kept the current strategy {name}",
+            )
+        if status == "degraded":
+            return self._t(
+                f"Стратегия {name} работает нестабильно ({passed} из {total}), рабочей замены не нашлось",
+                f"Strategy {name} is unstable ({passed} of {total}), no working replacement found",
+            )
+        if status == "skipped":
+            return self._t("Обход был выключен, проверка пропущена", "Bypass was off, check skipped")
+        return ""
+
+    def _record_health_check_result(self, result: dict) -> None:
+        summary = self._describe_health_check(result)
+        try:
+            self.context.settings.update(
+                auto_recheck_last_result={
+                    "status": str(result.get("status", "")),
+                    "general_id": str(result.get("general_id", "") or ""),
+                    "general_name": str(result.get("general_name", "") or ""),
+                    "switched": bool(result.get("switched")),
+                    "summary": summary,
+                    "finished_at": datetime.utcnow().isoformat(),
+                }
+            )
+        except Exception as error:
+            self.context.logging.log("warning", "auto_recheck_result_save_failed", error=str(error))
+        self.context.logging.log(
+            "info",
+            "background_health_check_finished",
+            status=str(result.get("status", "")),
+            general=str(result.get("general_id", "") or ""),
+            switched=bool(result.get("switched")),
+            summary=summary,
+        )
+        if summary:
+            self._show_health_check_status(summary)
+            # даём прочитать итог, прежде чем плашка вернётся к обычному виду
+            QTimer.singleShot(12000, self._clear_health_check_status)
+        else:
+            self._clear_health_check_status()
+        self._reload_settings_page()
+
+    def _clear_health_check_status(self) -> None:
+        if getattr(self, "_health_check_task_id", None):
+            return
+        self._set_tray_tooltip()
+        self._toggle_status_label.setText("")
+        self._toggle_status_card.setVisible(False)
+        self._stop_toggle_pulse()
+        self.refresh_dashboard()
+
     def _handle_health_check_result(self, payload: object) -> None:
         self._health_check_task_id = None
+        self._set_strategy_selection_active(False)
         if not isinstance(payload, dict):
             return
         result = payload.get("health_check")
         if not isinstance(result, dict):
             return
         status = str(result.get("status", ""))
+        self._record_health_check_result(result)
         if status in {"skipped", "ok"}:
             return
+        summary = self._describe_health_check(result)
         if status == "reselected" and bool(result.get("switched")):
             self._invalidate_general_options_cache()
             self._page_payload_cache.clear()
-            general_id = str(result.get("general_id", ""))
             self._toast_notification(
                 "info",
                 self._t("Автоподбор стратегии", "Automatic strategy check"),
-                self._t(
-                    f"Прежняя стратегия перестала работать, переключился на {general_id}.",
-                    f"The previous strategy stopped working, switched to {general_id}.",
-                ),
+                summary,
             )
             return
         if status == "degraded":
             self._toast_notification(
                 "warning",
                 self._t("Автоподбор стратегии", "Automatic strategy check"),
-                self._t(
-                    "Текущая стратегия работает нестабильно, а рабочей замены не нашлось.",
-                    "The current strategy is unstable and no working replacement was found.",
-                ),
+                summary,
             )
 
     def _maybe_prompt_autostart(self) -> None:

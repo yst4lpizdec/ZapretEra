@@ -1140,7 +1140,14 @@ def _handle_background_health_check(context, payload, emit_progress):
     allow_reselect = True
     if isinstance(payload, dict):
         allow_reselect = bool(payload.get("allow_reselect", True))
-    result = context.processes.background_health_check(allow_reselect=allow_reselect)
+    result = context.processes.background_health_check(
+        allow_reselect=allow_reselect,
+        progress=(
+            (lambda info: emit_progress({"action": "background_health_check", **dict(info)}))
+            if emit_progress is not None
+            else None
+        ),
+    )
     snapshot = _snapshot(context)
     snapshot["health_check"] = result
     snapshot["general_options"] = context.processes.list_zapret_generals()

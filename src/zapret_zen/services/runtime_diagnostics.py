@@ -10,6 +10,22 @@ from zapret_zen.services.logging_service import LoggingManager
 from zapret_zen.services.settings import SettingsManager
 
 
+def _progress_emitter(
+    progress: Callable[[dict[str, object]], None] | None,
+) -> Callable[[dict[str, object]], None]:
+    """Прогресс носит справочный характер: его сбой не должен ронять проверку."""
+    if progress is None:
+        return lambda _payload: None
+
+    def _emit(payload: dict[str, object]) -> None:
+        try:
+            progress(payload)
+        except Exception:
+            return
+
+    return _emit
+
+
 class RuntimeDiagnostics:
     """Connectivity checks, test targets, diagnostic runtime management."""
 
@@ -75,33 +91,93 @@ class RuntimeDiagnostics:
         )
         return original_running
 
-    def auto_select_working_general(self) -> dict[str, object] | None:
+    def auto_select_working_general(
+        self,
+        *,
+        progress: Callable[[dict[str, object]], None] | None = None,
+    ) -> dict[str, object] | None:
         options = self._list_zapret_generals()
         if not options:
             return None
         original = self.settings.get().selected_zapret_general
         best_result: dict[str, object] | None = None
-        for option in options:
+        total = len(options)
+        tried: list[dict[str, object]] = []
+        _emit = _progress_emitter(progress)
+        for index, option in enumerate(options, start=1):
+            _emit(
+                {
+                    "phase": "select",
+                    "current": index,
+                    "total": total,
+                    "general_id": option["id"],
+                    "general_name": option.get("name", ""),
+                    "bundle": option.get("bundle", ""),
+                }
+            )
             outcome = self._run_general_connectivity_check(option["id"])
-            if best_result is None or int(outcome.get("passed_targets", 0)) > int(best_result.get("passed_targets", 0)):
+            passed = int(outcome.get("passed_targets", 0) or 0)
+            total_targets = int(outcome.get("total_targets", 0) or 0)
+            status = str(outcome.get("status", ""))
+            tried.append(
+                {
+                    "id": option["id"],
+                    "name": option.get("name", ""),
+                    "status": status,
+                    "passed_targets": passed,
+                    "total_targets": total_targets,
+                }
+            )
+            self.logging.log(
+                "info",
+                "auto_select_general_probe",
+                general=option["id"],
+                name=option.get("name", ""),
+                index=index,
+                total=total,
+                status=status,
+                passed=passed,
+                total_targets=total_targets,
+            )
+            _emit(
+                {
+                    "phase": "select_result",
+                    "current": index,
+                    "total": total,
+                    "general_id": option["id"],
+                    "general_name": option.get("name", ""),
+                    "status": status,
+                    "passed": passed,
+                    "total_targets": total_targets,
+                }
+            )
+            if best_result is None or passed > int(best_result.get("passed_targets", 0)):
                 best_result = {
                     "id": option["id"],
-                    "status": outcome["status"],
-                    "passed_targets": outcome.get("passed_targets", 0),
-                    "total_targets": outcome.get("total_targets", 0),
+                    "name": option.get("name", ""),
+                    "status": status,
+                    "passed_targets": passed,
+                    "total_targets": total_targets,
                 }
-            if outcome["status"] == "ok":
+            if status == "ok":
                 self._stop_component("zapret")
                 self.logging.log("info", "Auto-selected zapret general", general=option["id"])
                 return {
                     "id": option["id"],
+                    "name": option.get("name", ""),
                     "status": "ok",
-                    "passed_targets": outcome.get("passed_targets", 0),
-                    "total_targets": outcome.get("total_targets", 0),
+                    "passed_targets": passed,
+                    "total_targets": total_targets,
+                    "tried": tried,
+                    "checked": index,
+                    "candidates": total,
                 }
             self._stop_component("zapret")
         if best_result is not None and best_result.get("id"):
             self.settings.update(selected_zapret_general=str(best_result["id"]))
+            best_result["tried"] = tried
+            best_result["checked"] = total
+            best_result["candidates"] = total
             return best_result
         self.settings.update(selected_zapret_general=original)
         return None

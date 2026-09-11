@@ -66,6 +66,7 @@ class AppSettings:
     auto_recheck_enabled: bool = False
     auto_recheck_prompt_version: str = ""
     auto_recheck_last_run: str = ""
+    auto_recheck_last_result: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

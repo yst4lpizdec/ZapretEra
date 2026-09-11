@@ -35,7 +35,7 @@ from zapret_zen.services.storage import StorageManager
 from zapret_zen.services.vpn_detector import VpnDetector
 from zapret_zen.services.github_recovery import GitHubRecovery
 from zapret_zen.services.tg_proxy_manager import TelegramProxyManager
-from zapret_zen.services.runtime_diagnostics import RuntimeDiagnostics
+from zapret_zen.services.runtime_diagnostics import RuntimeDiagnostics, _progress_emitter
 from zapret_zen.services.runtime_updates import RuntimeUpdateManager
 from zapret_zen.services.zapret_runtime import ZapretRuntimeBuilder
 
@@ -1788,17 +1788,18 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             lines.append(line)
         return lines
 
-    def auto_select_working_general(self) -> dict[str, object] | None:
-        return self.diagnostics.auto_select_working_general()
+    def auto_select_working_general(self, *, progress=None) -> dict[str, object] | None:
+        return self.diagnostics.auto_select_working_general(progress=progress)
 
     HEALTH_CHECK_PASS_RATIO = 0.75
 
-    def probe_current_general(self) -> dict[str, object]:
+    def probe_current_general(self, *, progress=None) -> dict[str, object]:
         """Быстрая проверка уже запущенной стратегии, без перезапуска winws.
 
         Полный подбор занимает минуты и рвёт соединение, поэтому в фоне
         сначала выясняем, работает ли текущая конфигурация вообще.
         """
+        emit = _progress_emitter(progress)
         settings = self.settings.get()
         general_id = str(settings.selected_zapret_general or "")
         targets = self._load_standard_test_targets()
@@ -1806,6 +1807,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             return {"status": "unknown", "general_id": general_id, "passed": 0, "total": 0, "failed_targets": []}
         passed = 0
         failed_names: list[str] = []
+        done = 0
         with ThreadPoolExecutor(max_workers=min(8, len(targets))) as executor:
             future_map = {executor.submit(self._check_target, target): target for target in targets}
             for future in as_completed(future_map):
@@ -1817,6 +1819,16 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     passed += 1
                 else:
                     failed_names.append(str(future_map[future].get("name", "")))
+                done += 1
+                emit(
+                    {
+                        "phase": "probe_target",
+                        "current": done,
+                        "total": len(targets),
+                        "name": str(future_map[future].get("name", "")),
+                        "ok": result == "ok",
+                    }
+                )
         total = len(targets)
         healthy = passed >= max(1, int(round(total * self.HEALTH_CHECK_PASS_RATIO)))
         return {
@@ -1827,12 +1839,40 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             "failed_targets": failed_names,
         }
 
-    def background_health_check(self, *, allow_reselect: bool = True) -> dict[str, object]:
+    def _general_display_name(self, general_id: str) -> str:
+        """Человекочитаемое имя стратегии по её id (`bundle|general (ALT3).bat`)."""
+        target = str(general_id or "")
+        if not target:
+            return ""
+        try:
+            for option in self.list_zapret_generals():
+                if option.get("id") == target:
+                    return str(option.get("name", "") or target)
+        except Exception:
+            pass
+        return target.split("|", 1)[-1]
+
+    def background_health_check(self, *, allow_reselect: bool = True, progress=None) -> dict[str, object]:
         """Проверить текущую стратегию и, если она деградировала, подобрать другую."""
+        emit = _progress_emitter(progress)
         if not self._is_image_running("winws.exe"):
+            emit({"phase": "done", "status": "skipped"})
             return {"status": "skipped", "reason": "zapret is not running"}
-        probe = self.probe_current_general()
+        emit({"phase": "probe_start"})
+        probe = self.probe_current_general(progress=progress)
         previous_id = str(probe.get("general_id", ""))
+        previous_name = self._general_display_name(previous_id)
+        probe["general_name"] = previous_name
+        emit(
+            {
+                "phase": "probe_done",
+                "status": str(probe.get("status", "")),
+                "passed": probe.get("passed"),
+                "total": probe.get("total"),
+                "general_id": previous_id,
+                "general_name": previous_name,
+            }
+        )
         if probe.get("status") != "degraded":
             self.logging.log(
                 "info",
@@ -1841,7 +1881,14 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 passed=probe.get("passed"),
                 total=probe.get("total"),
             )
-            return {"status": "ok", "probe": probe, "switched": False, "general_id": previous_id}
+            emit({"phase": "done", "status": "ok", "general_id": previous_id, "general_name": previous_name})
+            return {
+                "status": "ok",
+                "probe": probe,
+                "switched": False,
+                "general_id": previous_id,
+                "general_name": previous_name,
+            }
         self.logging.log(
             "warning",
             "background_health_check_degraded",
@@ -1851,17 +1898,34 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             failed_targets=probe.get("failed_targets"),
         )
         if not allow_reselect:
-            return {"status": "degraded", "probe": probe, "switched": False, "general_id": previous_id}
-        selected = self.auto_select_working_general()
+            emit({"phase": "done", "status": "degraded", "general_id": previous_id, "general_name": previous_name})
+            return {
+                "status": "degraded",
+                "probe": probe,
+                "switched": False,
+                "general_id": previous_id,
+                "general_name": previous_name,
+            }
+        emit({"phase": "select_start", "previous_general_id": previous_id, "general_name": previous_name})
+        selected = self.auto_select_working_general(progress=progress)
         if not selected or not selected.get("id"):
             # Подбор ничего не дал - возвращаем прежнюю стратегию, чтобы не
             # оставить пользователя вообще без обхода.
             if previous_id:
                 self.settings.update(selected_zapret_general=previous_id)
             self.start_component("zapret")
-            return {"status": "degraded", "probe": probe, "switched": False, "general_id": previous_id}
+            emit({"phase": "done", "status": "degraded", "general_id": previous_id, "general_name": previous_name})
+            return {
+                "status": "degraded",
+                "probe": probe,
+                "switched": False,
+                "general_id": previous_id,
+                "general_name": previous_name,
+            }
         new_id = str(selected["id"])
+        new_name = str(selected.get("name", "") or self._general_display_name(new_id))
         self.settings.update(selected_zapret_general=new_id)
+        emit({"phase": "restart", "general_id": new_id, "general_name": new_name})
         state = self.start_component("zapret")
         switched = new_id != previous_id
         self.logging.log(
@@ -1870,14 +1934,30 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             previous=previous_id,
             selected=new_id,
             switched=switched,
+            checked=selected.get("checked"),
+            candidates=selected.get("candidates"),
+            passed=selected.get("passed_targets"),
+            total_targets=selected.get("total_targets"),
             start_status=getattr(state, "status", ""),
+        )
+        emit(
+            {
+                "phase": "done",
+                "status": "reselected",
+                "switched": switched,
+                "general_id": new_id,
+                "general_name": new_name,
+            }
         )
         return {
             "status": "reselected",
             "probe": probe,
             "switched": switched,
             "general_id": new_id,
+            "general_name": new_name,
             "previous_general_id": previous_id,
+            "previous_general_name": previous_name,
+            "start_status": str(getattr(state, "status", "")),
             "selection": selected,
         }
 
