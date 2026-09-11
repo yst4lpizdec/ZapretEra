@@ -30,6 +30,7 @@ class AppSettings:
     enabled_component_ids: list[str] = field(default_factory=list)
     autostart_component_ids: list[str] = field(default_factory=list)
     component_selection_initialized: bool = False
+    autostart_components_synced: bool = False
     enabled_mod_ids: list[str] = field(default_factory=list)
     pending_mod_welcome: dict[str, str] = field(default_factory=dict)
     seen_mod_welcomes: dict[str, str] = field(default_factory=dict)

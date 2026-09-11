@@ -183,19 +183,26 @@ def _start_enabled_aux_components(context, *, exclude: set[str] | None = None) -
 def _set_zapret_enabled_from_components(context, enabled_target: bool) -> dict[str, Any]:
     settings = context.settings.get()
     enabled = {str(item) for item in list(settings.enabled_component_ids or [])}
+    autostart = {str(item) for item in list(settings.autostart_component_ids or [])}
     _states, any_running, zapret_running = _runtime_running_states(context)
 
     if enabled_target:
         enabled.add("zapret")
+        # без этого обход остаётся вне списка автозапуска и при старте Windows
+        # поднимается только tg-ws-proxy
+        autostart.add("zapret")
         _set_enabled_components(context, enabled)
         context.settings.update(
             selected_runtime_mode="zapret",
+            autostart_component_ids=sorted(autostart),
         )
         if any_running:
             context.processes.start_component("zapret")
     else:
         enabled.discard("zapret")
+        autostart.discard("zapret")
         _set_enabled_components(context, enabled)
+        context.settings.update(autostart_component_ids=sorted(autostart))
         if zapret_running:
             context.processes.stop_component("zapret")
     return _snapshot(context)
@@ -631,6 +638,7 @@ def _handle_set_selected_services(context, payload, emit_progress):
     has_zapret_services = bool(requested - {"telegram-desktop", "ai"})
     if has_zapret_services:
         enabled_components.add("zapret")
+        autostart_components.add("zapret")
     else:
         enabled_components.discard("zapret")
         autostart_components.discard("zapret")

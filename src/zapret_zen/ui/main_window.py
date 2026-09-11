@@ -11096,6 +11096,16 @@ class MainWindow(QMainWindow):
             self._component_states_cache = {}
             self._ensure_local_runtime_snapshot()
             self._mark_dirty("dashboard", "components", "tray")
+            # Догоняем отставшие компоненты: обновления снимка мало, иначе после
+            # автозапуска остаётся поднятым только то, что стартовало успешно.
+            self.context.logging.log(
+                "info",
+                "partial_runtime_autoheal",
+                attempt=self._partial_restart_count,
+                running=sorted(running_ids),
+                missing=sorted(set(active_ids) - running_ids),
+            )
+            self._submit_backend_task("start_enabled_components", {"autostart_only": False})
 
     def _toggle_master_runtime_worker(self) -> None:
         try:

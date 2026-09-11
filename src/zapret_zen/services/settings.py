@@ -75,6 +75,21 @@ class SettingsManager:
             settings.tg_proxy_link_prompt_signature = ""
             changed = True
 
+        # Одноразовый ремонт: до версии 1.2.1 "zapret" никогда не попадал в
+        # autostart_component_ids (его дефолт был False, а все пути включения
+        # добавляли туда только tg-ws-proxy). Из-за этого при старте Windows
+        # поднимался один прокси, а обход оставался выключенным.
+        if not bool(raw.get("autostart_components_synced", False)):
+            autostart_ids = [str(item) for item in list(settings.autostart_component_ids or [])]
+            for component_id in (settings.enabled_component_ids or []):
+                if component_id == "dns-manager":
+                    continue
+                if component_id not in autostart_ids:
+                    autostart_ids.append(str(component_id))
+            settings.autostart_component_ids = sorted(autostart_ids)
+            settings.autostart_components_synced = True
+            changed = True
+
         if not raw.get("language"):
             settings.language = self._detect_system_language()
             changed = True

@@ -37,7 +37,7 @@ class StorageManager:
                 "source": "https://github.com/Flowseal/zapret-discord-youtube",
                 "command": ["cmd.exe", "/c", "general.bat"],
                 "enabled": True,
-                "autostart": False,
+                "autostart": True,
             },
 
             {
