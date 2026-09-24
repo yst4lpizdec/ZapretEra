@@ -215,6 +215,13 @@ def _attach_telegram_proxy_info(context, result: dict[str, Any]) -> None:
         info = None
     if isinstance(info, dict) and info:
         result["telegram_proxy"] = info
+    # здесь же отдаём и другие разовые уведомления о запуске рантайма
+    try:
+        removed_service = context.processes.consume_removed_foreign_zapret_service()
+    except Exception:
+        removed_service = None
+    if removed_service:
+        result["foreign_zapret_service_removed"] = removed_service
 
 def _worker_main(task_queue, result_queue) -> None:
     from zapret_zen.bootstrap import bootstrap_application
@@ -312,6 +319,7 @@ _TG_PROXY_SETTINGS_FIELDS = (
     "tg_proxy_cfproxy_enabled",
     "tg_proxy_cfproxy_domain",
     "tg_proxy_cfproxy_worker_domain",
+    "tg_proxy_no_secure",
     "tg_proxy_fake_tls_domain",
     "tg_proxy_buf_kb",
     "tg_proxy_pool_size",
@@ -439,6 +447,9 @@ def _retry_autostart_component(context, component_id: str, state):
 def _handle_start_enabled_components(context, payload, emit_progress):
     _sync_telegram_component_from_services(context)
     autostart_only = bool(payload.get("autostart_only", False)) if isinstance(payload, dict) else False
+    # DNS-пресет переживает перезагрузку: если его серверы умерли, без этой
+    # проверки обход поднимется, а сайты всё равно не откроются
+    dns_health = _check_dns_health(context)
     components = context.processes.list_components()
     states = {item.component_id: item for item in context.processes.list_states()}
     started: list[str] = []
@@ -453,8 +464,13 @@ def _handle_start_enabled_components(context, payload, emit_progress):
             continue
         state = states.get(component.id)
         if state is not None and state.status == "running":
-            skipped.append(component.id)
-            continue
+            # winws от чужой службы (например, service.bat Flowseal) тоже даёт
+            # "running"; такой не пропускаем - запуск своего его погасит
+            foreign = component.id == "zapret" and context.processes.zapret_running_is_foreign()
+            if not foreign:
+                skipped.append(component.id)
+                continue
+            context.logging.log("info", "Foreign winws detected, starting own bypass instead")
         state = context.processes.start_component(component.id)
         if autostart_only and getattr(state, "status", "") == "error":
             # При старте вместе с Windows драйвер WinDivert и сетевой стек
@@ -480,6 +496,8 @@ def _handle_start_enabled_components(context, payload, emit_progress):
     context.processes._invalidate_state_cache()  # Invalidate again for fresh data
     result = _snapshot(context)
     _attach_telegram_proxy_info(context, result)
+    if dns_health:
+        result["dns_health"] = dns_health
     return result
 
 
@@ -541,6 +559,7 @@ def _handle_apply_settings(context, payload, emit_progress):
         bool(before.tg_proxy_cfproxy_enabled),
         before.tg_proxy_cfproxy_domain,
         before.tg_proxy_cfproxy_worker_domain,
+        bool(before.tg_proxy_no_secure),
         before.tg_proxy_fake_tls_domain,
         int(before.tg_proxy_buf_kb),
         int(before.tg_proxy_pool_size),
@@ -550,6 +569,8 @@ def _handle_apply_settings(context, payload, emit_progress):
         before.zapret_game_filter_mode,
         before.zapret_udp_exclude_ports,
         before.selected_zapret_general,
+        before.zapret_game_filter_tcp_ports,
+        before.zapret_game_filter_udp_ports,
     )
     theme_before = before.theme
     language_before = before.language
@@ -564,6 +585,8 @@ def _handle_apply_settings(context, payload, emit_progress):
         str(effective_payload.get("zapret_game_filter_mode", before.zapret_game_filter_mode)),
         str(effective_payload.get("zapret_udp_exclude_ports", before.zapret_udp_exclude_ports)),
         str(effective_payload.get("selected_zapret_general", before.selected_zapret_general)),
+        str(effective_payload.get("zapret_game_filter_tcp_ports", before.zapret_game_filter_tcp_ports)),
+        str(effective_payload.get("zapret_game_filter_udp_ports", before.zapret_game_filter_udp_ports)),
     )
     zapret_changed = zapret_before != requested_zapret
     zapret_was_running = _stop_zapret_for_reconfiguration(context) if zapret_changed else False
@@ -575,6 +598,7 @@ def _handle_apply_settings(context, payload, emit_progress):
         bool(effective_payload.get("tg_proxy_cfproxy_enabled", context.settings.get().tg_proxy_cfproxy_enabled)),
         str(effective_payload.get("tg_proxy_cfproxy_domain", context.settings.get().tg_proxy_cfproxy_domain)),
         str(effective_payload.get("tg_proxy_cfproxy_worker_domain", context.settings.get().tg_proxy_cfproxy_worker_domain)),
+        bool(effective_payload.get("tg_proxy_no_secure", context.settings.get().tg_proxy_no_secure)),
         str(effective_payload.get("tg_proxy_fake_tls_domain", context.settings.get().tg_proxy_fake_tls_domain)),
         int(effective_payload.get("tg_proxy_buf_kb", context.settings.get().tg_proxy_buf_kb)),
         int(effective_payload.get("tg_proxy_pool_size", context.settings.get().tg_proxy_pool_size)),
@@ -585,6 +609,8 @@ def _handle_apply_settings(context, payload, emit_progress):
         current.zapret_game_filter_mode,
         current.zapret_udp_exclude_ports,
         current.selected_zapret_general,
+        current.zapret_game_filter_tcp_ports,
+        current.zapret_game_filter_udp_ports,
     )
     states = {item.component_id: item for item in context.processes.list_states()}
     if tg_before != tg_after and states.get("tg-ws-proxy") and states["tg-ws-proxy"].status == "running":
@@ -1179,6 +1205,27 @@ def _handle_update_zapret_runtime(context, payload, emit_progress):
 @_register_action("update_tg_ws_proxy_runtime")
 def _handle_update_tg_ws_proxy_runtime(context, payload, emit_progress):
     result = context.processes.update_tg_ws_proxy_runtime()
+    result.update(_snapshot(context))
+    return result
+
+
+def _check_dns_health(context) -> dict[str, Any]:
+    try:
+        health = context.processes.check_dns_manager_health()
+    except Exception as error:
+        context.logging.log("warning", "DNS health check failed", error=str(error))
+        return {}
+    if health.get("restored"):
+        # иначе переключатель остался бы включённым при сброшенном DNS
+        enabled = {str(item) for item in list(context.settings.get().enabled_component_ids or [])}
+        enabled.discard("dns-manager")
+        _set_enabled_components(context, enabled)
+    return health
+
+
+@_register_action("check_dns_health")
+def _handle_check_dns_health(context, payload, emit_progress):
+    result = {"dns_health": _check_dns_health(context)}
     result.update(_snapshot(context))
     return result
 

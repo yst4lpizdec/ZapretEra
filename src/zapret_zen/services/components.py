@@ -30,7 +30,7 @@ from zapret_zen.services.github_network import GitHubNetworkClient, is_recoverab
 from zapret_zen.services.logging_service import LoggingManager
 from zapret_zen.services.service_catalog import ALWAYS_APPLY_SERVICE_IDS
 from zapret_zen.services.service_rules import SERVICE_RULES
-from zapret_zen.services.settings import SettingsManager
+from zapret_zen.services.settings import DEFAULT_GAME_FILTER_PORTS, SettingsManager, normalize_port_ranges
 from zapret_zen.services.storage import StorageManager
 from zapret_zen.services.vpn_detector import VpnDetector
 from zapret_zen.services.github_recovery import GitHubRecovery
@@ -178,6 +178,7 @@ class ProcessManager:
         self._creationflags = 0
         self._startupinfo: subprocess.STARTUPINFO | None = None
         self._app_started_services: set[str] = set()
+        self._removed_foreign_zapret_service: str | None = None
         if sys.platform.startswith("win"):
             self._creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
             startup = subprocess.STARTUPINFO()
@@ -271,6 +272,90 @@ class ProcessManager:
     def is_telegram_running(self) -> bool:
         """Запущен ли Telegram Desktop прямо сейчас."""
         return self._is_telegram_running()
+
+    # счётчики, которые растут только от настоящего клиента MTProto;
+    # наши проверки порта увеличивают лишь total
+    _TG_REAL_CONNECTION_COUNTERS = ("ws", "tcp_fb", "cf", "front", "bad", "masked", "err")
+
+    def telegram_proxy_usage(self) -> dict[str, int]:
+        """Статистика текущего запуска tg-ws-proxy по его логу.
+
+        samples - сколько минутных строк stats прошло с запуска,
+        real - сколько подключений действительно пришло от Telegram.
+        """
+        path = self.storage.paths.logs_dir / "tg_ws_proxy.log"
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 256 * 1024))
+                text = handle.read().decode("utf-8", errors="ignore")
+        except OSError:
+            return {"samples": 0, "real": 0}
+        session_start = text.rfind("Telegram MTProto WS Bridge Proxy")
+        if session_start >= 0:
+            text = text[session_start:]
+        stats_lines = [line for line in text.splitlines() if " stats: " in line]
+        if not stats_lines:
+            return {"samples": 0, "real": 0}
+        counters = dict(re.findall(r"\b([a-z_]+)=(\d+)\b", stats_lines[-1]))
+        real = sum(int(counters.get(name, 0)) for name in self._TG_REAL_CONNECTION_COUNTERS)
+        return {"samples": len(stats_lines), "real": real}
+
+    def find_foreign_zapret_service(self) -> dict[str, str] | None:
+        """Служба "zapret", поставленная не нами (обычно service.bat от Flowseal).
+
+        Она стартует вместе с Windows раньше приложения и поднимает свой winws
+        со своей стратегией, который мешает нашему.
+        """
+        if not sys.platform.startswith("win") or not self._service_exists("zapret"):
+            return None
+        image_path = self._service_image_path("zapret")
+        if image_path and self._path_mentions_runtime(image_path, self.storage.paths.install_root):
+            return None
+        return {"name": "zapret", "image_path": image_path, "state": self._service_state("zapret")}
+
+    def remove_foreign_zapret_service(self) -> bool:
+        if self.find_foreign_zapret_service() is None:
+            return True
+        self.logging.log("info", "Removing foreign zapret service", image_path=self._service_image_path("zapret"))
+        self._run_quiet(["sc", "stop", "zapret"])
+        for _ in range(10):
+            if self._service_state("zapret") in ("", "STOPPED"):
+                break
+            time.sleep(0.5)
+        result = self._run_quiet(["sc", "delete", "zapret"])
+        if result.returncode != 0:
+            self.logging.log(
+                "warning",
+                "Failed to remove foreign zapret service",
+                error=((result.stderr or "") + (result.stdout or "")).strip()[-500:],
+            )
+            return False
+        return True
+
+    def consume_removed_foreign_zapret_service(self) -> str | None:
+        """Путь чужой службы, которую мы убрали при запуске обхода (один раз)."""
+        removed = self._removed_foreign_zapret_service
+        self._removed_foreign_zapret_service = None
+        return removed
+
+    def zapret_running_is_foreign(self) -> bool:
+        """Запущенный winws.exe не из нашей папки установки."""
+        if not sys.platform.startswith("win"):
+            return False
+        output = self._run_powershell_json(
+            "@(Get-CimInstance Win32_Process -Filter \"Name='winws.exe'\" | "
+            "ForEach-Object { [string]$_.ExecutablePath }) | ConvertTo-Json -Compress"
+        )
+        try:
+            paths = json.loads(output) if output else []
+        except ValueError:
+            return False
+        if isinstance(paths, str):
+            paths = [paths]
+        paths = [str(item) for item in paths if str(item or "").strip()]
+        # путь не прочитался - не считаем процесс чужим, чтобы не гасить свой
+        return any(not self._path_mentions_runtime(path, self.storage.paths.install_root) for path in paths)
 
     def consume_telegram_proxy_launch_info(self) -> dict[str, Any] | None:
         info = self._telegram_proxy_launch_info
@@ -809,6 +894,7 @@ class ProcessManager:
                 ).strip()
                 if not arg or arg == "^":
                     continue
+                arg = self._unescape_batch_carets(arg)
                 # убираем лишние кавычки из bat-синтаксиса
                 if arg.startswith('"') and arg.endswith('"') and len(arg) >= 2:
                     arg = arg[1:-1]
@@ -1038,6 +1124,23 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             logical_lines.append(current)
         return logical_lines
 
+    @staticmethod
+    def _unescape_batch_carets(value: str) -> str:
+        # cmd снимает "^" перед следующим символом вне кавычек: "^!" -> "!"
+        result: list[str] = []
+        in_quotes = False
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == '"':
+                in_quotes = not in_quotes
+            elif char == "^" and not in_quotes and index + 1 < len(value):
+                index += 1
+                char = value[index]
+            result.append(char)
+            index += 1
+        return "".join(result)
+
     def _expand_batch_value(
         self,
         value: str,
@@ -1121,30 +1224,50 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _should_force_fortnite_runtime_modes(self) -> bool:
         return self._fortnite_service_selected() and not self._diagnostic_runtime_override
 
+    def _game_filter_ports(self) -> tuple[str, str]:
+        settings = self.settings.get()
+        tcp_ports = normalize_port_ranges(getattr(settings, "zapret_game_filter_tcp_ports", "")) or DEFAULT_GAME_FILTER_PORTS
+        udp_ports = normalize_port_ranges(getattr(settings, "zapret_game_filter_udp_ports", "")) or DEFAULT_GAME_FILTER_PORTS
+        return tcp_ports, udp_ports
+
     def _get_game_filter_values(self, runtime_root: Path) -> tuple[str, str, str]:
         mode_from_settings = (self.settings.get().zapret_game_filter_mode or "").strip().lower()
         if self._should_force_fortnite_runtime_modes():
             mode_from_settings = "tcpudp"
         if mode_from_settings == "auto":
             mode_from_settings = ""
+        tcp_ports, udp_ports = self._game_filter_ports()
         if mode_from_settings in {"all", "tcpudp"}:
-            return ("1024-65535", "1024-65535", "1024-65535")
+            return (tcp_ports, tcp_ports, udp_ports)
         if mode_from_settings == "tcp":
-            return ("1024-65535", "1024-65535", "12")
+            return (tcp_ports, tcp_ports, "12")
         if mode_from_settings == "udp":
-            return ("1024-65535", "12", "1024-65535")
+            return (udp_ports, "12", udp_ports)
         if mode_from_settings == "disabled":
             return ("12", "12", "12")
         mode_file = runtime_root / "utils" / "game_filter.enabled"
         if not mode_file.exists():
             return ("12", "12", "12")
-        mode = mode_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
+        # С zapret 1.10.3 файл хранит "mode=/tcp=/udp=" с диапазонами портов;
+        # старый формат из одного слова (all/tcp/udp) тоже понимаем.
+        mode = ""
+        ranges = {"tcp": "1024-65535", "udp": "1024-65535"}
+        for raw in mode_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            key, sep, value = raw.strip().partition("=")
+            key, value = key.strip().lower(), value.strip().replace(" ", "")
+            if not sep:
+                if key and not mode:
+                    mode = key
+            elif key == "mode":
+                mode = value.lower()
+            elif key in ranges and normalize_port_ranges(value):
+                ranges[key] = normalize_port_ranges(value) or ranges[key]
         if mode in {"all", "tcpudp"}:
-            return ("1024-65535", "1024-65535", "1024-65535")
+            return (ranges["tcp"], ranges["tcp"], ranges["udp"])
         if mode == "tcp":
-            return ("1024-65535", "1024-65535", "12")
+            return (ranges["tcp"], ranges["tcp"], "12")
         if mode == "udp":
-            return ("1024-65535", "12", "1024-65535")
+            return (ranges["udp"], "12", ranges["udp"])
         return ("12", "12", "12")
 
     def _apply_zapret_runtime_switches(self, runtime_root: Path) -> None:
@@ -1170,7 +1293,13 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             game_mode = "tcpudp"
         game_flag = utils_dir / "game_filter.enabled"
         if game_mode in ("all", "tcp", "udp", "tcpudp"):
-            game_flag.write_text(game_mode, encoding="utf-8")
+            # формат service.bat 1.10.3: "tcpudp" он не знает, только all/tcp/udp
+            flag_mode = "all" if game_mode == "tcpudp" else game_mode
+            tcp_ports, udp_ports = self._game_filter_ports()
+            game_flag.write_text(
+                f"mode={flag_mode}\ntcp={tcp_ports}\nudp={udp_ports}\n",
+                encoding="utf-8",
+            )
         elif game_flag.exists():
             game_flag.unlink(missing_ok=True)
 
@@ -1217,6 +1346,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             tg_cfproxy_enabled=bool(settings.tg_proxy_cfproxy_enabled),
             tg_cfproxy_domain=settings.tg_proxy_cfproxy_domain,
             tg_cfproxy_worker_domain=settings.tg_proxy_cfproxy_worker_domain,
+            tg_no_secure=bool(settings.tg_proxy_no_secure),
             tg_fake_tls_domain=settings.tg_proxy_fake_tls_domain,
             tg_buf_kb=int(settings.tg_proxy_buf_kb or 256),
             tg_pool_size=int(settings.tg_proxy_pool_size or 4),
@@ -1310,6 +1440,82 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
     def _dns_manager_state_file(self) -> Path:
         return self.storage.paths.data_dir / "dns_manager_state.json"
 
+    # домены, которые должны резолвиться у любого рабочего DNS
+    DNS_PROBE_DOMAINS = ("api.steampowered.com", "discord.com", "telegram.org")
+    DNS_CONTROL_SERVERS = ("1.1.1.1", "8.8.8.8")
+    DNS_INTERCEPT_CANARY = "192.0.2.1"
+
+    def _dns_server_resolves(self, server: str, domain: str, timeout: float = 2.5) -> bool:
+        """Прямой A-запрос к серверу по UDP 53, мимо системного резолвера и кэша."""
+        query_id = secrets.randbelow(0x10000)
+        header = query_id.to_bytes(2, "big") + b"\x01\x00" + b"\x00\x01" + b"\x00\x00" * 3
+        qname = b"".join(len(part).to_bytes(1, "big") + part.encode("ascii") for part in domain.split(".")) + b"\x00"
+        packet = header + qname + b"\x00\x01\x00\x01"
+        family = socket.AF_INET6 if ":" in server else socket.AF_INET
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(timeout)
+                sock.sendto(packet, (server, 53))
+                data, _ = sock.recvfrom(4096)
+        except OSError:
+            return False
+        if len(data) < 12 or int.from_bytes(data[0:2], "big") != query_id:
+            return False
+        flags = int.from_bytes(data[2:4], "big")
+        answers = int.from_bytes(data[6:8], "big")
+        return bool(flags & 0x8000) and (flags & 0x000F) == 0 and answers > 0
+
+    def _dns_servers_working(self, servers: list[str]) -> list[str]:
+        """Серверы, которые резолвят большинство проверочных доменов."""
+        servers = [str(item).strip() for item in servers if str(item).strip()]
+        if not servers:
+            return []
+        needed = len(self.DNS_PROBE_DOMAINS) // 2 + 1
+        jobs = [(server, domain) for server in servers for domain in self.DNS_PROBE_DOMAINS]
+        hits: dict[str, int] = {server: 0 for server in servers}
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as pool:
+            futures = {pool.submit(self._dns_server_resolves, server, domain): server for server, domain in jobs}
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        hits[futures[future]] += 1
+                except Exception:
+                    pass
+        return [server for server in servers if hits[server] >= needed]
+
+    def _dns_preset_unreachable(self, ipv4: list[str]) -> bool:
+        """Серверы пресета молчат, хотя сеть есть (контрольные DNS отвечают).
+
+        Без сети отвечать не будет никто - тогда не считаем пресет виноватым.
+        """
+        if not ipv4:
+            return False
+        # VPN с TUN (WARP, sing-box и т.п.) или провайдер перехватывают весь
+        # UDP 53, и отвечает перехватчик, а не сервер пресета. Адрес из TEST-NET
+        # в интернете не существует: раз он "ответил" - проба ничего не докажет
+        if self._dns_server_resolves(self.DNS_INTERCEPT_CANARY, self.DNS_PROBE_DOMAINS[0]):
+            return False
+        if self._dns_servers_working(list(ipv4)):
+            return False
+        return bool(self._dns_servers_working(list(self.DNS_CONTROL_SERVERS)))
+
+    def check_dns_manager_health(self) -> dict[str, Any]:
+        """Проверить применённый пресет и откатить DNS, если его серверы не отвечают."""
+        if not self._dns_manager_is_active():
+            return {"active": False}
+        try:
+            data = json.loads(self._dns_manager_state_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"active": True, "ok": True}
+        servers = data.get("servers") if isinstance(data.get("servers"), dict) else {}
+        preset = str(servers.get("source", "") or "")
+        ipv4 = [str(item) for item in (servers.get("ipv4") or [])]
+        if not self._dns_preset_unreachable(ipv4):
+            return {"active": True, "ok": True, "preset": preset}
+        self.logging.log("warning", "DNS preset servers do not respond, restoring DNS", preset=preset, servers=ipv4)
+        self._stop_dns_manager("dns-manager")
+        return {"active": True, "ok": False, "restored": True, "preset": preset}
+
     def _dns_manager_is_active(self) -> bool:
         state_file = self._dns_manager_state_file()
         if not state_file.exists():
@@ -1365,6 +1571,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             p = dns.PRESETS.get(preset)
             if p is None:
                 raise ValueError(f"Unknown DNS preset: {preset}")
+            # мёртвый или заблокированный у провайдера DNS молча оставляет
+            # без интернета, поэтому сначала спрашиваем его серверы напрямую
+            if self._dns_preset_unreachable(list(p["ipv4"])):
+                raise RuntimeError(f"DNS preset servers do not respond: {', '.join(p['ipv4'])}")
 
             adapters = dns.snapshot_windows_dns()
             if not adapters:
@@ -2793,6 +3003,10 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     continue
             owner = "app" if service_name in self._app_started_services else "external/unknown"
             self.logging.log("info", "Stopping driver service", service_name=service_name, owner=owner)
+            if service_name.lower() == "zapret":
+                foreign = self.find_foreign_zapret_service()
+                if foreign is not None:
+                    self._removed_foreign_zapret_service = foreign.get("image_path") or "zapret"
             stop_result = self._run_quiet(["sc", "stop", service_name])
             if stop_result.returncode != 0:
                 self.logging.log(

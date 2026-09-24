@@ -30,6 +30,7 @@ def run_tg_ws_proxy_worker(
     cfproxy_enabled: bool = True,
     cfproxy_domain: str = "",
     cfproxy_worker_domain: str = "",
+    no_secure: bool = False,
     fake_tls_domain: str = "",
     buf_kb: int = 256,
     pool_size: int = 4,
@@ -87,6 +88,15 @@ def run_tg_ws_proxy_worker(
         argv.extend(["--cfproxy-domain", domain])
     for domain in _split_domain_list(cfproxy_worker_domain):
         argv.extend(["--cfproxy-worker-domain", domain])
+    if no_secure:
+        # флаг есть только с tg-ws-proxy 1.10.3; на старом рантайме argparse
+        # упал бы на незнакомом аргументе, поэтому проверяем поддержку
+        from proxy.config import proxy_config
+
+        if hasattr(proxy_config, "disable_secure"):
+            argv.append("--no-secure")
+        else:
+            print("tg-ws-proxy runtime is too old for --no-secure, ignoring it", file=sys.stderr)
     if fake_tls_domain.strip():
         argv.extend(["--fake-tls-domain", fake_tls_domain.strip()])
     if str(log_file or "").strip():

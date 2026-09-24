@@ -385,6 +385,20 @@ function Clear-HubRegistryDns($guid, $family) {
     try { Set-ItemProperty -LiteralPath $path -Name NameServer -Value "" -ErrorAction Stop } catch {}
   }
 }
+function Resolve-HubIfIndex($ifIndex, $guid, $alias) {
+  # номер интерфейса меняется после переподключения адаптера или смены
+  # драйвера, а GUID остаётся - ищем текущий адаптер по нему
+  if ($guid) {
+    $byGuid = Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { [string]$_.InterfaceGuid -eq $guid } | Select-Object -First 1
+    if ($byGuid) { return [int]$byGuid.ifIndex }
+  }
+  if ($alias) {
+    $byAlias = Get-NetAdapter -Name $alias -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($byAlias) { return [int]$byAlias.ifIndex }
+  }
+  if ($ifIndex -gt 0 -and (Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue)) { return [int]$ifIndex }
+  return 0
+}
 function Reset-HubDnsServers($ifIndex, $guid) {
   if ($ifIndex -le 0) { return }
   try {
@@ -405,9 +419,10 @@ function Set-HubDnsServers($ifIndex, $guid, $ipv4, $ipv6) {
   } catch { throw $_ }
 }
 foreach ($adapter in @($payload.adapters)) {
-  $ifIndex = [int]$adapter.interface_index
-  if ($ifIndex -le 0) { continue }
   $guid = [string]$adapter.interface_guid
+  $ifIndex = Resolve-HubIfIndex ([int]$adapter.interface_index) $guid ([string]$adapter.interface_alias)
+  # адаптера из снимка больше нет - восстанавливать нечего
+  if ($ifIndex -le 0) { continue }
   $ipv4Manual = if ($null -ne $adapter.ipv4_manual) { [bool]$adapter.ipv4_manual } else { @($adapter.ipv4).Count -gt 0 }
   $ipv6Manual = if ($null -ne $adapter.ipv6_manual) { [bool]$adapter.ipv6_manual } else { @($adapter.ipv6).Count -gt 0 }
   if (-not $ipv4Manual -and -not $ipv6Manual) {

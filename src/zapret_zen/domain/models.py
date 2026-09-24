@@ -49,6 +49,8 @@ class AppSettings:
     tg_proxy_link_prompt_signature: str = ""
     tg_proxy_media_mode: str = "default"
     tg_proxy_connect_prompt_version: str = ""
+    tg_proxy_no_secure: bool = False
+    tg_proxy_unused_hint_dismissed: bool = False
     selected_zapret_general: str = ""
     favorite_zapret_generals: list[str] = field(default_factory=list)
     general_autotest_done: bool = False
@@ -57,6 +59,8 @@ class AppSettings:
     selected_runtime_mode: str = "zapret"
     zapret_ipset_mode: str = "loaded"
     zapret_game_filter_mode: str = "disabled"
+    zapret_game_filter_tcp_ports: str = "1024-65535"
+    zapret_game_filter_udp_ports: str = "1024-65535"
     zapret_udp_exclude_ports: str = "51820"
     zapret_block_quic: bool = False
     selected_dns_preset: str = ""

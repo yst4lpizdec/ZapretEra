@@ -77,6 +77,7 @@ from zapret_zen.ui.pages import DashboardPage, ServicesPage, ComponentsPage, Mod
 
 from zapret_zen.services import translation as _tr
 from zapret_zen.services.zapret_runtime import ZapretRuntimeBuilder
+from zapret_zen.services.settings import DEFAULT_GAME_FILTER_PORTS, normalize_port_ranges
 
 class WindowsTaskbarIntegration:
     TBPF_NOPROGRESS = 0
@@ -3882,6 +3883,7 @@ class SettingsDialog(AppDialog):
         self.tg_dc_ip_input = QTextEdit()
         self.tg_dc_ip_input.setFixedHeight(72)
         self.tg_cfproxy_checkbox = QCheckBox(self._t("Cloudflare fallback"))
+        self.tg_no_secure_checkbox = QCheckBox(self._t("CF без TLS (порт 80)", "CF without TLS (port 80)"))
         self.tg_cfproxy_domain_input = QLineEdit()
         self.tg_cfproxy_worker_domain_input = QLineEdit()
         self.tg_fake_tls_input = QLineEdit()
@@ -3945,6 +3947,7 @@ class SettingsDialog(AppDialog):
         tg_form.addRow(self._t("Media mode"), self.tg_media_mode_combo)
         tg_form.addRow("DC -> IP", self.tg_dc_ip_input)
         tg_form.addRow("", self.tg_cfproxy_checkbox)
+        tg_form.addRow("", self.tg_no_secure_checkbox)
         tg_form.addRow(self._t("CF domain"), self.tg_cfproxy_domain_input)
         tg_form.addRow(self._t("CF Worker domain"), self.tg_cfproxy_worker_domain_input)
         tg_form.addRow(self._t("Fake TLS domain"), self.tg_fake_tls_input)
@@ -4070,6 +4073,7 @@ class SettingsDialog(AppDialog):
         self.tg_secret_input.setText(settings.tg_proxy_secret)
         self.tg_dc_ip_input.setPlainText(settings.tg_proxy_dc_ip)
         self.tg_cfproxy_checkbox.setChecked(settings.tg_proxy_cfproxy_enabled)
+        self.tg_no_secure_checkbox.setChecked(bool(settings.tg_proxy_no_secure))
         self.tg_cfproxy_domain_input.setText(settings.tg_proxy_cfproxy_domain)
         self.tg_cfproxy_worker_domain_input.setText(settings.tg_proxy_cfproxy_worker_domain)
         self.tg_fake_tls_input.setText(settings.tg_proxy_fake_tls_domain)
@@ -4100,6 +4104,7 @@ class SettingsDialog(AppDialog):
         tg_dc_ip = str(payload.get("tg_proxy_dc_ip", self.context.settings.get().tg_proxy_dc_ip))
         self.tg_dc_ip_input.setPlainText(tg_dc_ip)
         self.tg_cfproxy_checkbox.setChecked(bool(payload.get("tg_proxy_cfproxy_enabled", self.context.settings.get().tg_proxy_cfproxy_enabled)))
+        self.tg_no_secure_checkbox.setChecked(bool(payload.get("tg_proxy_no_secure", self.context.settings.get().tg_proxy_no_secure)))
         self.tg_cfproxy_domain_input.setText(str(payload.get("tg_proxy_cfproxy_domain", self.context.settings.get().tg_proxy_cfproxy_domain)))
         self.tg_cfproxy_worker_domain_input.setText(str(payload.get("tg_proxy_cfproxy_worker_domain", self.context.settings.get().tg_proxy_cfproxy_worker_domain)))
         self.tg_fake_tls_input.setText(str(payload.get("tg_proxy_fake_tls_domain", self.context.settings.get().tg_proxy_fake_tls_domain)))
@@ -4140,6 +4145,7 @@ class SettingsDialog(AppDialog):
             "tg_proxy_secret": self.tg_secret_input.text().strip(),
             "tg_proxy_dc_ip": self.tg_dc_ip_input.toPlainText().strip(),
             "tg_proxy_cfproxy_enabled": self.tg_cfproxy_checkbox.isChecked(),
+            "tg_proxy_no_secure": self.tg_no_secure_checkbox.isChecked(),
             "tg_proxy_cfproxy_worker_domain": self.tg_cfproxy_worker_domain_input.text().strip(),
             "tg_proxy_cfproxy_domain": self.tg_cfproxy_domain_input.text().strip(),
             "tg_proxy_fake_tls_domain": self.tg_fake_tls_input.text().strip(),
@@ -4814,6 +4820,7 @@ class MainWindow(QMainWindow):
         self._sync_power_aura_geometry()
         if not self._startup_snapshot_ready:
             QTimer.singleShot(0, lambda: self._submit_backend_task("load_startup_snapshot", action_id="__startup_snapshot__"))
+        QTimer.singleShot(self.TG_PROXY_USAGE_CHECK_MS, self._check_telegram_proxy_usage)
 
     def _themed_icon_color(self, filename: str) -> QColor | None:
         if filename not in {"power.svg", "share.svg", "trash.svg", "search.svg", "refresh.svg", "external.svg", "vpn.svg", "vpn.png"}:
@@ -5350,6 +5357,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(2600, self._prime_cached_dialogs)
         if not self._onboarding_active:
             QTimer.singleShot(3600, self._maybe_run_first_general_autotest)
+        QTimer.singleShot(3000, self._maybe_prompt_foreign_zapret_service)
+        QTimer.singleShot(3500, self._check_dns_health_on_start)
         QTimer.singleShot(4200, self._maybe_prompt_telegram_proxy_connect)
         QTimer.singleShot(4800, self._check_updates_on_start)
         QTimer.singleShot(5600, self._check_component_updates_background)
@@ -5931,6 +5940,110 @@ class MainWindow(QMainWindow):
             ),
         )
 
+    def _foreign_zapret_service_text(self, image_path: str) -> str:
+        location = image_path if image_path and image_path != "zapret" else self._t("неизвестно", "unknown")
+        return self._t(
+            "В системе установлена служба «zapret» от другой сборки (обычно это «Install Service» "
+            "из оригинального Flowseal). Она запускается вместе с Windows, поднимает свой winws "
+            f"и ломает обход: сайты, Discord и Telegram начинают работать через раз.\n\nПуть: {location}",
+            "A \"zapret\" service from another build is installed (usually \"Install Service\" from "
+            "the original Flowseal bundle). It starts with Windows, runs its own winws and breaks the "
+            f"bypass: sites, Discord and Telegram work only sometimes.\n\nPath: {location}",
+        )
+
+    def _notify_foreign_zapret_service_from_payload(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        removed = str(payload.get("foreign_zapret_service_removed") or "")
+        if not removed:
+            return
+        # про службу уже спрашивали в этом запуске - второй диалог не нужен
+        already_explained = bool(getattr(self, "_foreign_service_prompt_done", False))
+        self._foreign_service_prompt_done = True
+        text = self._foreign_zapret_service_text(removed) + self._t(
+            "\n\nМы удалили её, чтобы обход работал. Если поставите её снова, проблемы вернутся.",
+            "\n\nWe removed it so the bypass works. If you install it again, the problems will come back.",
+        )
+        if self.isVisible() and not self._launch_hidden and not already_explained:
+            self._show_info(self._t("Служба zapret удалена", "zapret service removed"), text)
+        else:
+            self._toast_notification(
+                "warning",
+                self._t("Служба zapret удалена", "zapret service removed"),
+                self._t(
+                    "Удалена служба «zapret» от другой сборки: она мешала обходу.",
+                    "Removed a \"zapret\" service from another build: it was breaking the bypass.",
+                ),
+            )
+
+    def _check_dns_health_on_start(self) -> None:
+        # DNS-пресет живёт в настройках Windows между перезагрузками,
+        # поэтому проверяем его при каждом старте, а не только при включении
+        try:
+            self._submit_backend_task("check_dns_health")
+        except Exception:
+            pass
+
+    def _notify_dns_health_from_payload(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        health = payload.get("dns_health")
+        if not isinstance(health, dict) or not health.get("restored"):
+            return
+        self._reload_settings_page()
+        self._toast_notification(
+            "warning",
+            self._t("DNS Manager выключен", "DNS Manager turned off"),
+            self._t(
+                "DNS-серверы выбранного пресета перестали отвечать, из-за этого сайты и программы "
+                "не открывались. Мы вернули обычный DNS. Можно выбрать другой пресет.",
+                "The selected DNS preset's servers stopped responding, so sites and apps could not "
+                "connect. We restored the regular DNS. You can pick another preset.",
+            ),
+        )
+
+    def _maybe_prompt_foreign_zapret_service(self) -> None:
+        """Если служба Flowseal уже стоит при открытии окна - предложить удалить."""
+        if self._launch_hidden or getattr(self, "_foreign_service_prompt_done", False):
+            return
+        onboarding = getattr(self, "_onboarding_widget", None)
+        if onboarding is not None and onboarding.isVisible():
+            QTimer.singleShot(8000, self._maybe_prompt_foreign_zapret_service)
+            return
+        try:
+            foreign = self.context.processes.find_foreign_zapret_service()
+        except Exception:
+            return
+        if foreign is None:
+            return
+        self._foreign_service_prompt_done = True
+        agreed = self._ask_yes_no(
+            self._t("Мешающая служба zapret", "Conflicting zapret service"),
+            self._foreign_zapret_service_text(str(foreign.get("image_path") or ""))
+            + self._t("\n\nУдалить её?", "\n\nRemove it?"),
+        )
+        if not agreed:
+            return
+        try:
+            removed = bool(self.context.processes.remove_foreign_zapret_service())
+        except Exception as error:
+            self.context.logging.log("warning", "Foreign zapret service removal failed", error=str(error))
+            removed = False
+        if not removed:
+            self._show_error(
+                self._t("Служба zapret", "zapret service"),
+                self._t(
+                    "Не удалось удалить службу. Откройте командную строку от имени администратора и "
+                    "выполните: sc stop zapret, затем sc delete zapret.",
+                    "Could not remove the service. Open Command Prompt as administrator and run: "
+                    "sc stop zapret, then sc delete zapret.",
+                ),
+            )
+            return
+        # чужой winws мог остаться - перезапускаем свой обход, если он включён
+        if "zapret" in list(self.context.settings.get().enabled_component_ids or []):
+            self._submit_backend_task("start_component", {"component_id": "zapret"})
+
     def _notify_zapret_restart_from_payload(self, payload: object) -> None:
         if not isinstance(payload, dict) or not bool(payload.get("zapret_restarted")):
             return
@@ -5971,6 +6084,13 @@ class MainWindow(QMainWindow):
             )
         if "no general script found" in lowered:
             return self._t("Zapret configuration was not found.")
+        if "dns preset servers do not respond" in lowered:
+            return self._t(
+                "DNS-серверы выбранного пресета не отвечают из вашей сети, поэтому он не применён. "
+                "Выберите другой пресет.",
+                "The selected DNS preset's servers do not respond from your network, so it was not applied. "
+                "Pick another preset.",
+            )
         return text
 
     def _build_tools_menu(self) -> QMenu:
@@ -7813,6 +7933,22 @@ class MainWindow(QMainWindow):
         zapret_section.addWidget(QLabel(self._t("Gaming mode")))
         game_w, _ = _segment(game_items, settings.zapret_game_filter_mode, "gaming_mode")
         zapret_section.addWidget(game_w)
+        for port_key, port_label, port_value in (
+            ("game_tcp_ports", self._t("Порты игрового режима TCP", "Gaming mode TCP ports"), settings.zapret_game_filter_tcp_ports),
+            ("game_udp_ports", self._t("Порты игрового режима UDP", "Gaming mode UDP ports"), settings.zapret_game_filter_udp_ports),
+        ):
+            port_input = QLineEdit()
+            port_input.setText(port_value or DEFAULT_GAME_FILTER_PORTS)
+            port_input.setPlaceholderText(DEFAULT_GAME_FILTER_PORTS)
+            port_input.setToolTip(
+                self._t(
+                    "Порты и диапазоны через запятую. Например, 1024-1934,1936-65535 исключает RTMP (1935).",
+                    "Ports and ranges separated by commas. For example, 1024-1934,1936-65535 excludes RTMP (1935).",
+                )
+            )
+            ctrl[port_key] = port_input
+            zapret_section.addWidget(QLabel(port_label))
+            zapret_section.addWidget(port_input)
         udp_excl = QLineEdit()
         udp_excl.setText(settings.zapret_udp_exclude_ports or "")
         ctrl["udp_exclude"] = udp_excl
@@ -7930,6 +8066,18 @@ class MainWindow(QMainWindow):
         tg_cf_cb.setChecked(settings.tg_proxy_cfproxy_enabled)
         ctrl["tg_cfproxy"] = tg_cf_cb
         tg_section.addWidget(tg_cf_cb)
+        tg_no_secure_cb = QCheckBox(self._t("CF без TLS (порт 80)", "CF without TLS (port 80)"))
+        tg_no_secure_cb.setChecked(bool(settings.tg_proxy_no_secure))
+        tg_no_secure_cb.setToolTip(
+            self._t(
+                "Подключаться к CF-прокси и CF-worker без TLS. Может помочь, если в логе прокси "
+                "много Timeout, и ускоряет установку соединения.",
+                "Connect to CF proxy and CF worker without TLS. May help when the proxy log shows "
+                "many timeouts, and makes connecting faster.",
+            )
+        )
+        ctrl["tg_no_secure"] = tg_no_secure_cb
+        tg_section.addWidget(tg_no_secure_cb)
         tg_cf_domain = QLineEdit()
         tg_cf_domain.setText(settings.tg_proxy_cfproxy_domain or "")
         ctrl["tg_cf_domain"] = tg_cf_domain
@@ -8217,7 +8365,7 @@ class MainWindow(QMainWindow):
         lang_grp = all_ctrl.get("language")
         if isinstance(lang_grp, QButtonGroup):
             lang_grp.idClicked.connect(_lang_changed)
-        for key in ("autostart", "tray", "auto_components", "check_updates", "auto_recheck", "tg_cfproxy"):
+        for key in ("autostart", "tray", "auto_components", "check_updates", "auto_recheck", "tg_cfproxy", "tg_no_secure"):
             cb = all_ctrl.get(key)
             if isinstance(cb, QCheckBox):
                 cb.stateChanged.connect(_ctrl_changed)
@@ -8232,6 +8380,13 @@ class MainWindow(QMainWindow):
         tg_dc = all_ctrl.get("tg_dc")
         if isinstance(tg_dc, QTextEdit):
             tg_dc.textChanged.connect(_schedule_ctrl_save)
+        # смена портов перезапускает обход, поэтому сохраняем по окончании
+        # ввода, а не на каждое промежуточное значение вроде "1"
+        for key in ("game_tcp_ports", "game_udp_ports"):
+            inp = all_ctrl.get(key)
+            if isinstance(inp, QLineEdit):
+                inp.textChanged.connect(lambda _text, field=inp: self._mark_port_ranges_input(field))
+                inp.editingFinished.connect(_ctrl_changed)
 
         return page
 
@@ -8324,6 +8479,13 @@ class MainWindow(QMainWindow):
         inp = ctrl.get("udp_exclude")
         if isinstance(inp, QLineEdit):
             inp.setText(settings.zapret_udp_exclude_ports or "")
+        for key, value in (
+            ("game_tcp_ports", settings.zapret_game_filter_tcp_ports),
+            ("game_udp_ports", settings.zapret_game_filter_udp_ports),
+        ):
+            inp = ctrl.get(key)
+            if isinstance(inp, QLineEdit) and not inp.hasFocus():
+                inp.setText(value or DEFAULT_GAME_FILTER_PORTS)
         cb = ctrl.get("block_quic")
         if isinstance(cb, QCheckBox):
             cb.setChecked(settings.zapret_block_quic)
@@ -8343,6 +8505,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("tg_cfproxy")
         if isinstance(cb, QCheckBox):
             cb.setChecked(settings.tg_proxy_cfproxy_enabled)
+        cb = ctrl.get("tg_no_secure")
+        if isinstance(cb, QCheckBox):
+            cb.setChecked(bool(settings.tg_proxy_no_secure))
         inp = ctrl.get("tg_cf_domain")
         if isinstance(inp, QLineEdit):
             inp.setText(settings.tg_proxy_cfproxy_domain or "")
@@ -8411,6 +8576,16 @@ class MainWindow(QMainWindow):
         inp = ctrl.get("udp_exclude")
         if isinstance(inp, QLineEdit):
             payload["zapret_udp_exclude_ports"] = inp.text()
+        for key, field_name in (
+            ("game_tcp_ports", "zapret_game_filter_tcp_ports"),
+            ("game_udp_ports", "zapret_game_filter_udp_ports"),
+        ):
+            inp = ctrl.get(key)
+            if isinstance(inp, QLineEdit):
+                # неверный ввод не сохраняем - поле подсвечено красным
+                ports = normalize_port_ranges(inp.text() or DEFAULT_GAME_FILTER_PORTS)
+                if ports is not None:
+                    payload[field_name] = ports
         cb = ctrl.get("block_quic")
         if isinstance(cb, QCheckBox):
             payload["zapret_block_quic"] = cb.isChecked()
@@ -8430,6 +8605,9 @@ class MainWindow(QMainWindow):
         cb = ctrl.get("tg_cfproxy")
         if isinstance(cb, QCheckBox):
             payload["tg_proxy_cfproxy_enabled"] = cb.isChecked()
+        cb = ctrl.get("tg_no_secure")
+        if isinstance(cb, QCheckBox):
+            payload["tg_proxy_no_secure"] = cb.isChecked()
         inp = ctrl.get("tg_cf_domain")
         if isinstance(inp, QLineEdit):
             payload["tg_proxy_cfproxy_domain"] = inp.text()
@@ -9317,6 +9495,8 @@ class MainWindow(QMainWindow):
         if action in {"toggle_master_runtime", "start_enabled_components", "start_component", "select_general", "apply_settings", "load_startup_snapshot", "load_components_payload", "select_runtime_mode"}:
             self._notify_component_errors_from_payload(payload)
         self._notify_telegram_proxy_status_from_payload(payload)
+        self._notify_foreign_zapret_service_from_payload(payload)
+        self._notify_dns_health_from_payload(payload)
         self._notify_zapret_restart_from_payload(payload)
         if action in {"update_zapret_runtime", "update_tg_ws_proxy_runtime"}:
             self._invalidate_general_options_cache()
@@ -15179,6 +15359,10 @@ class MainWindow(QMainWindow):
         self._reload_settings_page()
 
 
+    def _mark_port_ranges_input(self, field: QLineEdit) -> None:
+        valid = normalize_port_ranges(field.text() or DEFAULT_GAME_FILTER_PORTS) is not None
+        field.setStyleSheet("" if valid else "QLineEdit { border: 1px solid #e5484d; }")
+
     def _ask_yes_no(self, title: str, text: str) -> bool:
         dialog = AppDialog(self, self.context, title)
         label = QLabel(text)
@@ -15758,6 +15942,86 @@ class MainWindow(QMainWindow):
         dialog.prepare_and_center()
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._prompt_tg_proxy_connect()
+
+    TG_PROXY_USAGE_CHECK_MS = 180000
+    TG_PROXY_USAGE_MAX_ATTEMPTS = 4
+
+    def _check_telegram_proxy_usage(self, attempt: int = 0) -> None:
+        """Прокси работает, Telegram открыт, но ни одного подключения через прокси.
+
+        Так бывает, когда в Telegram выбран старый или чужой прокси: он молча
+        висит на "Соединение...", а в логе прокси пусто.
+        """
+        settings = self.context.settings.get()
+        if bool(settings.tg_proxy_unused_hint_dismissed):
+            return
+        if "tg-ws-proxy" not in list(settings.enabled_component_ids or []):
+            return
+
+        def _retry() -> None:
+            if attempt + 1 < self.TG_PROXY_USAGE_MAX_ATTEMPTS:
+                QTimer.singleShot(
+                    self.TG_PROXY_USAGE_CHECK_MS,
+                    lambda: self._check_telegram_proxy_usage(attempt + 1),
+                )
+
+        try:
+            proxy_state = self._component_states().get("tg-ws-proxy")
+            proxy_running = getattr(proxy_state, "status", "") == "running"
+            telegram_running = self.context.processes.is_telegram_running()
+            usage = self.context.processes.telegram_proxy_usage()
+        except Exception:
+            return
+        # нужно хотя бы две минутные строки статистики, иначе рано судить
+        if not proxy_running or not telegram_running or int(usage.get("samples", 0)) < 2:
+            _retry()
+            return
+        if int(usage.get("real", 0)) > 0:
+            return
+        self.context.logging.log("warning", "Telegram is running but does not use the proxy", **usage)
+        text = self._t(
+            "Telegram открыт, но за несколько минут не отправил через прокси ни одного подключения. "
+            "Обычно в Telegram выбран старый или другой прокси, и он висит на «Соединение…».\n\n"
+            "Как исправить: в Telegram откройте Настройки → Продвинутые → Тип соединения, удалите все "
+            "прокси, затем нажмите «Подключить к Telegram» и подтвердите подключение.",
+            "Telegram is open but has not sent a single connection through the proxy for several minutes. "
+            "Usually Telegram has an old or different proxy selected and hangs on \"Connecting...\".\n\n"
+            "To fix it: in Telegram open Settings → Advanced → Connection type, delete all proxies, then "
+            "press \"Connect to Telegram\" and confirm the connection.",
+        )
+        if not self.isVisible() or self._launch_hidden:
+            self._toast_notification("warning", self._t("Telegram не использует прокси", "Telegram is not using the proxy"), text)
+            return
+        dialog = AppDialog(self, self.context, self._t("Telegram не использует прокси", "Telegram is not using the proxy"))
+        label = QLabel(text)
+        label.setWordWrap(True)
+        dialog.body_layout.addWidget(label)
+        row = QHBoxLayout()
+        never_btn = QPushButton(self._t("Больше не показывать", "Don't show again"))
+        later_btn = QPushButton(self._t("Not now"))
+        connect_btn = QPushButton(self._t("Connect to Telegram"))
+        connect_btn.setProperty("class", "primary")
+        for button in (never_btn, later_btn, connect_btn):
+            self._attach_button_animations(button)
+        dismissed = {"never": False}
+
+        def _never() -> None:
+            dismissed["never"] = True
+            dialog.reject()
+
+        never_btn.clicked.connect(_never)
+        later_btn.clicked.connect(dialog.reject)
+        connect_btn.clicked.connect(dialog.accept)
+        row.addWidget(never_btn)
+        row.addStretch(1)
+        row.addWidget(later_btn)
+        row.addWidget(connect_btn)
+        dialog.body_layout.addLayout(row)
+        dialog.prepare_and_center()
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._prompt_tg_proxy_connect()
+        elif dismissed["never"]:
+            self.context.settings.update(tg_proxy_unused_hint_dismissed=True)
 
     def _prompt_tg_proxy_connect(self) -> None:
         try:

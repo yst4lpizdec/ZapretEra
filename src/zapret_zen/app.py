@@ -232,6 +232,7 @@ def run(argv: list[str] | None = None) -> int:
             cfproxy_enabled=parse_bool_flag(known.tg_cfproxy_enabled),
             cfproxy_domain=known.tg_cfproxy_domain,
             cfproxy_worker_domain=known.tg_cfproxy_worker_domain,
+            no_secure=parse_bool_flag(known.tg_no_secure),
             fake_tls_domain=known.tg_fake_tls_domain,
             buf_kb=known.tg_buf_kb,
             pool_size=known.tg_pool_size,

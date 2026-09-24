@@ -12,6 +12,26 @@ from zapret_zen.services.storage import StorageManager
 if sys.platform.startswith("win"):
     import winreg
 
+DEFAULT_GAME_FILTER_PORTS = "1024-65535"
+
+
+def normalize_port_ranges(value: object) -> str | None:
+    """"1024-1934, 1936-65535" -> "1024-1934,1936-65535"; None, если ввод неверный.
+
+    Те же правила, что у :validate_game_filter_range в service.bat 1.10.3.
+    """
+    text = str(value or "").replace(" ", "")
+    if not text:
+        return None
+    for item in text.split(","):
+        start, sep, end = item.partition("-")
+        if not start.isdigit() or (sep and not end.isdigit()):
+            return None
+        first, last = int(start), int(end) if sep else int(start)
+        if not (1 <= first <= last <= 65535):
+            return None
+    return text
+
 
 class SettingsManager:
     def __init__(self, storage: StorageManager) -> None:
@@ -144,6 +164,14 @@ class SettingsManager:
         elif raw.get("zapret_game_filter_mode") not in {"disabled", "tcp", "udp", "tcpudp"}:
             settings.zapret_game_filter_mode = "disabled"
             changed = True
+
+        for field_name in ("zapret_game_filter_tcp_ports", "zapret_game_filter_udp_ports"):
+            normalized_ports = normalize_port_ranges(getattr(settings, field_name))
+            if normalized_ports is None:
+                normalized_ports = DEFAULT_GAME_FILTER_PORTS
+            if normalized_ports != getattr(settings, field_name):
+                setattr(settings, field_name, normalized_ports)
+                changed = True
 
         if raw.get("selected_runtime_mode") not in {"zapret"}:
             settings.selected_runtime_mode = "zapret"

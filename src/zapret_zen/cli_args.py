@@ -13,6 +13,7 @@ def build_worker_arg_group(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tg-cfproxy-enabled", default="true")
     parser.add_argument("--tg-cfproxy-domain", default="")
     parser.add_argument("--tg-cfproxy-worker-domain", default="")
+    parser.add_argument("--tg-no-secure", default="false")
     parser.add_argument("--tg-log-file", default="")
     parser.add_argument("--tg-log-max-mb", type=float, default=5.0)
     parser.add_argument("--tg-fake-tls-domain", default="")
