@@ -18,6 +18,13 @@ from pathlib import Path
 from cryptography.hazmat.primitives.ciphers import Cipher as _Cipher
 from cryptography.hazmat.primitives.ciphers import algorithms as _algorithms
 from cryptography.hazmat.primitives.ciphers import modes as _modes
+
+try:
+    # нужны proxy/cf_h2.py из новых версий tg-ws-proxy
+    import h2 as _h2
+    import httpx as _httpx
+except ImportError:
+    _h2 = _httpx = None
 from zapret_zen.runtime_env import development_install_root, is_packaged_runtime, packaged_install_root, packaged_resource_root
 
 
@@ -48,8 +55,11 @@ def run_tg_ws_proxy_worker(
         bundled_repo = resource_root / "runtime" / "tg-ws-proxy"
         if bundled_repo.exists():
             tg_repo = bundled_repo
+    # В установленной версии логи лежат в %APPDATA%, а не рядом с exe: пишем
+    # ошибку туда же, где лог прокси, иначе интерфейс её не найдёт.
+    logs_dir = Path(log_file).parent if str(log_file or "").strip() else install_root / "logs"
     if not tg_repo.exists():
-        print(f"tg-ws-proxy runtime directory not found: {tg_repo}", file=sys.stderr)
+        _write_worker_error(logs_dir, f"tg-ws-proxy runtime directory not found: {tg_repo}", "tg_worker_error.log")
         return 2
 
     proxy_pkg_root = str(tg_repo)
@@ -60,7 +70,7 @@ def run_tg_ws_proxy_worker(
         from proxy import tg_ws_proxy
     except Exception as error:
         _write_worker_error(
-            install_root,
+            logs_dir,
             f"Failed to import tg-ws-proxy worker: {error}\n{traceback.format_exc()}",
             "tg_worker_error.log",
         )
@@ -114,7 +124,7 @@ def run_tg_ws_proxy_worker(
             tg_ws_proxy.main()
         except Exception as error:
             _write_worker_error(
-                install_root,
+                logs_dir,
                 f"Worker crashed: {error}\n{traceback.format_exc()}",
                 "tg_worker_error.log",
             )
@@ -138,9 +148,8 @@ def _resolve_install_root() -> Path:
     return development_install_root(__file__)
 
 
-def _write_worker_error(install_root: Path, message: str, filename: str) -> None:
+def _write_worker_error(logs: Path, message: str, filename: str) -> None:
     try:
-        logs = install_root / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         path = logs / filename
         with path.open("a", encoding="utf-8") as handle:

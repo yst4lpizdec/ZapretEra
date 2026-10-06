@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import importlib.util
 import re
 import shutil
 import tempfile
@@ -184,6 +186,25 @@ class RuntimeUpdateManager:
                     self.logging.log("warning", "TG WS Proxy archive download failed", url=archive_url, error=last_error)
             if source_root is None:
                 return {"status": "error", "error": last_error or "Invalid tg-ws-proxy archive"}
+            # Прокси исполняется внутри нашего exe, поэтому сторонние пакеты
+            # берёт только из того, что вшито при сборке. Если апстрим начал
+            # требовать новый пакет (так было с httpx), ставить такую версию
+            # нельзя: рабочий прокси сменится на неимпортируемый.
+            missing = self._missing_tgws_modules(source_root)
+            if missing:
+                self.logging.log(
+                    "warning",
+                    "TG WS Proxy update skipped: runtime needs modules missing from this build",
+                    version=latest_version,
+                    missing=", ".join(missing),
+                )
+                return {
+                    "status": "error",
+                    "error": (
+                        f"tg-ws-proxy {latest_version or ''} требует модули, которых нет в этой версии "
+                        f"Zapret Zen ({', '.join(missing)}). Обновите приложение целиком."
+                    ),
+                }
             if was_running:
                 try:
                     self._stop_component("tg-ws-proxy")
@@ -210,6 +231,37 @@ class RuntimeUpdateManager:
             return {"status": "updated", "version": latest_version or current_version}
         finally:
             shutil.rmtree(temp_root, ignore_errors=True)
+
+    def _missing_tgws_modules(self, source_root: Path) -> list[str]:
+        """Внешние модули, которые proxy/*.py импортирует безусловно, но найти их нельзя."""
+        local = {"proxy", "utils", "__future__"}
+        wanted: set[str] = set()
+
+        def collect(statements: list[ast.stmt]) -> None:
+            for node in statements:
+                # импорты внутри try/функций считаем необязательными
+                if isinstance(node, ast.Import):
+                    wanted.update(alias.name.split(".")[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+                    wanted.add(node.module.split(".")[0])
+                elif isinstance(node, ast.If):
+                    collect(node.body)
+                    collect(node.orelse)
+
+        for path in sorted((source_root / "proxy").glob("*.py")):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+            except Exception:
+                continue
+            collect(tree.body)
+        missing = []
+        for name in sorted(wanted - local):
+            try:
+                if importlib.util.find_spec(name) is None:
+                    missing.append(name)
+            except Exception:
+                missing.append(name)
+        return missing
 
     def _find_extracted_tgws_root(self, extract_root: Path) -> Path | None:
         candidates = [extract_root]

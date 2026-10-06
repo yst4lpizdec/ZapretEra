@@ -275,7 +275,7 @@ class ProcessManager:
 
     # счётчики, которые растут только от настоящего клиента MTProto;
     # наши проверки порта увеличивают лишь total
-    _TG_REAL_CONNECTION_COUNTERS = ("ws", "tcp_fb", "cf", "front", "bad", "masked", "err")
+    _TG_REAL_CONNECTION_COUNTERS = ("ws", "h2", "tcp_fb", "cf", "front", "bad", "masked", "err")
 
     def telegram_proxy_usage(self) -> dict[str, int]:
         """Статистика текущего запуска tg-ws-proxy по его логу.

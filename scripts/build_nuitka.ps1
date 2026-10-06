@@ -84,6 +84,15 @@ $nuitkaArgs = @(
   "--include-package=cryptography",
   "--include-package=certifi",
   "--include-package-data=certifi",
+  # tg-ws-proxy 1.10.5+ ходит в Cloudflare по HTTP/2 через httpx (proxy/cf_h2.py)
+  "--include-package=httpx",
+  "--include-package=httpcore",
+  "--include-package=h11",
+  "--include-package=h2",
+  "--include-package=hpack",
+  "--include-package=hyperframe",
+  "--include-package=anyio",
+  "--include-package=idna",
   "--nofollow-import-to=tkinter",
   "--remove-output",
   "src\zapret_zen\main.py"
